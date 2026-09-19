@@ -23,8 +23,19 @@ GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
 GGML_Q8_0 = 8
+GGML_Q2_K = 10
+GGML_Q3_K = 11
 GGML_Q4_K = 12
+GGML_Q5_K = 13
 GGML_Q6_K = 14
+GGML_IQ2_XXS = 16
+GGML_IQ2_XS = 17
+GGML_IQ3_XXS = 18
+GGML_IQ1_S = 19
+GGML_IQ3_S = 21
+GGML_IQ2_S = 22
+GGML_IQ4_XS = 23
+GGML_IQ1_M = 29
 GGML_BF16 = 30
 
 # (block numel, bytes per block) per ggml type.
@@ -34,8 +45,19 @@ BLOCK_SHAPE: dict[int, tuple[int, int]] = {
     GGML_BF16: (1, 2),
     GGML_Q4_0: (32, 18),
     GGML_Q8_0: (32, 34),
+    GGML_Q2_K: (256, 84),
+    GGML_Q3_K: (256, 110),
     GGML_Q4_K: (256, 144),
+    GGML_Q5_K: (256, 176),
     GGML_Q6_K: (256, 210),
+    GGML_IQ2_XXS: (256, 66),
+    GGML_IQ2_XS: (256, 74),
+    GGML_IQ3_XXS: (256, 98),
+    GGML_IQ1_S: (256, 50),
+    GGML_IQ3_S: (256, 110),
+    GGML_IQ2_S: (256, 82),
+    GGML_IQ4_XS: (256, 136),
+    GGML_IQ1_M: (256, 56),
 }
 
 GGML_NAME = {
@@ -44,8 +66,19 @@ GGML_NAME = {
     GGML_BF16: "BF16",
     GGML_Q4_0: "Q4_0",
     GGML_Q8_0: "Q8_0",
+    GGML_Q2_K: "Q2_K",
+    GGML_Q3_K: "Q3_K",
     GGML_Q4_K: "Q4_K",
+    GGML_Q5_K: "Q5_K",
     GGML_Q6_K: "Q6_K",
+    GGML_IQ2_XXS: "IQ2_XXS",
+    GGML_IQ2_XS: "IQ2_XS",
+    GGML_IQ3_XXS: "IQ3_XXS",
+    GGML_IQ1_S: "IQ1_S",
+    GGML_IQ3_S: "IQ3_S",
+    GGML_IQ2_S: "IQ2_S",
+    GGML_IQ4_XS: "IQ4_XS",
+    GGML_IQ1_M: "IQ1_M",
 }
 
 
@@ -80,6 +113,72 @@ def dequant_q4_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     hi = (qs >> 4).to(torch.float32)
     q = torch.cat([lo, hi], dim=1)  # [N,32]
     return ((q - 8.0) * d).reshape(-1).to(out_dtype)
+
+
+def dequant_q2_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q2_K: 16 groups of 16 values with four-bit scales and minima."""
+    raw = raw.reshape(-1, 84)
+    scales = raw[:, 0:16].to(torch.int32)
+    qs = raw[:, 16:80].to(torch.int32)
+    d = _f16_scales(raw, 80, 82)
+    dmin = _f16_scales(raw, 82, 84)
+    output = torch.empty((raw.shape[0], 256), dtype=torch.float32, device=raw.device)
+    group = 0
+    for half in range(2):
+        packed = qs[:, half * 32 : (half + 1) * 32]
+        for shift in range(0, 8, 2):
+            for offset in (0, 16):
+                scale = scales[:, group : group + 1]
+                values = (packed[:, offset : offset + 16] >> shift) & 0x03
+                output[:, group * 16 : (group + 1) * 16] = (
+                    d * (scale & 0x0F).to(torch.float32) * values.to(torch.float32)
+                    - dmin * (scale >> 4).to(torch.float32)
+                )
+                group += 1
+    return output.reshape(-1).to(out_dtype)
+
+
+def dequant_q3_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q3_K: packed low two bits, a high-bit mask, and signed six-bit scales."""
+    raw = raw.reshape(-1, 110)
+    hmask = raw[:, 0:32].to(torch.int32)
+    qs = raw[:, 32:96].to(torch.int32)
+    packed_scales = raw[:, 96:108].to(torch.int64)
+    d = _f16_scales(raw, 108, 110)
+
+    words = []
+    for offset in (0, 4, 8):
+        word = torch.zeros(raw.shape[0], dtype=torch.int64, device=raw.device)
+        for byte in range(4):
+            word |= packed_scales[:, offset + byte] << (8 * byte)
+        words.append(word)
+    mask2 = 0x03030303
+    mask4 = 0x0F0F0F0F
+    scale_words = (
+        (words[0] & mask4) | (((words[2] >> 0) & mask2) << 4),
+        (words[1] & mask4) | (((words[2] >> 2) & mask2) << 4),
+        ((words[0] >> 4) & mask4) | (((words[2] >> 4) & mask2) << 4),
+        ((words[1] >> 4) & mask4) | (((words[2] >> 6) & mask2) << 4),
+    )
+    scales = torch.stack(
+        [(word >> (8 * byte)) & 0xFF for word in scale_words for byte in range(4)],
+        dim=1,
+    ).to(torch.float32) - 32.0
+
+    output = torch.empty((raw.shape[0], 256), dtype=torch.float32, device=raw.device)
+    group = 0
+    for half in range(2):
+        packed = qs[:, half * 32 : (half + 1) * 32]
+        for shift in range(0, 8, 2):
+            for offset in (0, 16):
+                low = (packed[:, offset : offset + 16] >> shift) & 0x03
+                high = hmask[:, offset : offset + 16] & (1 << (group // 2))
+                values = low - torch.where(high != 0, 0, 4)
+                output[:, group * 16 : (group + 1) * 16] = (
+                    d * scales[:, group : group + 1] * values.to(torch.float32)
+                )
+                group += 1
+    return output.reshape(-1).to(out_dtype)
 
 
 def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
@@ -159,9 +258,56 @@ def dequant_q4_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     return output.reshape(-1).to(out_dtype)
 
 
+def dequant_q5_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q5_K: Q4_K scales/minima with one high quant bit per value."""
+    raw = raw.reshape(-1, 176)
+    d = _f16_scales(raw, 0, 2)
+    dmin = _f16_scales(raw, 2, 4)
+    packed_scales = raw[:, 4:16].to(torch.int32)
+    qh = raw[:, 16:48].to(torch.int32)
+    qs = raw[:, 48:176].to(torch.int32)
+
+    scales = torch.empty((raw.shape[0], 8), dtype=torch.float32, device=raw.device)
+    mins = torch.empty_like(scales)
+    for index in range(8):
+        if index < 4:
+            scales[:, index] = (packed_scales[:, index] & 0x3F).to(torch.float32)
+            mins[:, index] = (packed_scales[:, index + 4] & 0x3F).to(torch.float32)
+        else:
+            scales[:, index] = (
+                (packed_scales[:, index + 4] & 0x0F)
+                | ((packed_scales[:, index - 4] >> 6) << 4)
+            ).to(torch.float32)
+            mins[:, index] = (
+                (packed_scales[:, index + 4] >> 4)
+                | ((packed_scales[:, index] >> 6) << 4)
+            ).to(torch.float32)
+
+    output = torch.empty((raw.shape[0], 256), dtype=torch.float32, device=raw.device)
+    for group in range(4):
+        packed = qs[:, group * 32 : (group + 1) * 32]
+        high_low = ((qh & (1 << (2 * group))) != 0).to(torch.int32) << 4
+        high_high = ((qh & (2 << (2 * group))) != 0).to(torch.int32) << 4
+        first = group * 2
+        output[:, group * 64 : group * 64 + 32] = (
+            d * scales[:, first : first + 1]
+            * ((packed & 0x0F) + high_low).to(torch.float32)
+            - dmin * mins[:, first : first + 1]
+        )
+        output[:, group * 64 + 32 : (group + 1) * 64] = (
+            d * scales[:, first + 1 : first + 2]
+            * ((packed >> 4) + high_high).to(torch.float32)
+            - dmin * mins[:, first + 1 : first + 2]
+        )
+    return output.reshape(-1).to(out_dtype)
+
+
 _DEQUANT = {
     GGML_Q4_0: dequant_q4_0,
+    GGML_Q2_K: dequant_q2_k,
+    GGML_Q3_K: dequant_q3_k,
     GGML_Q4_K: dequant_q4_k,
+    GGML_Q5_K: dequant_q5_k,
     GGML_Q6_K: dequant_q6_k,
 }
 
@@ -187,13 +333,27 @@ __all__ = [
     "GGML_BF16",
     "GGML_F16",
     "GGML_F32",
+    "GGML_IQ1_M",
+    "GGML_IQ1_S",
+    "GGML_IQ2_S",
+    "GGML_IQ2_XS",
+    "GGML_IQ2_XXS",
+    "GGML_IQ3_S",
+    "GGML_IQ3_XXS",
+    "GGML_IQ4_XS",
     "GGML_NAME",
+    "GGML_Q2_K",
+    "GGML_Q3_K",
     "GGML_Q4_0",
     "GGML_Q4_K",
+    "GGML_Q5_K",
     "GGML_Q6_K",
     "GGML_Q8_0",
+    "dequant_q2_k",
+    "dequant_q3_k",
     "dequant_q4_0",
     "dequant_q4_k",
+    "dequant_q5_k",
     "dequant_q6_k",
     "dequantize",
     "row_bytes",
