@@ -56,6 +56,11 @@ def causal_conv1d_decode(
 ) -> torch.Tensor:
     """Single-token (decode) causal conv update with silu; shifts+appends the new
     token into ``conv_state[conv_state_indices]`` in place and returns silu(conv)."""
+    if x.device.type == "xpu":
+        from freetoken.kernel.sycl.causal_conv1d import causal_conv1d_decode_sycl
+
+        return causal_conv1d_decode_sycl(x, conv_state, weight, conv_state_indices)
+
     from freetoken.kernel.backend import is_sgl_kernel_installed
 
     if not is_sgl_kernel_installed():

@@ -2,13 +2,11 @@ from __future__ import annotations
 
 import importlib.util
 import os
+import sys
 from pathlib import Path
 
-import sys
-
 from setuptools import setup
-from torch.utils.cpp_extension import BuildExtension, CUDA_HOME, CppExtension
-
+from torch.utils.cpp_extension import CUDA_HOME, BuildExtension, CppExtension
 
 ROOT = Path(__file__).parent
 
@@ -39,6 +37,32 @@ if ACCELERATOR not in {"cuda", "xpu"}:
     raise RuntimeError("FREETOKEN_ACCELERATOR must be either 'cuda' or 'xpu'")
 
 
+def _sycl_include_dir() -> str:
+    oneapi_root = Path(os.environ.get("ONEAPI_ROOT", "/opt/intel/oneapi"))
+    compiler_version = os.environ.get("FREETOKEN_SYCL_COMPILER_VERSION", "latest")
+    include_dir = oneapi_root / "compiler" / compiler_version / "include"
+    if not (include_dir / "sycl" / "sycl.hpp").exists():
+        raise RuntimeError(
+            "oneAPI SYCL headers were not found; set ONEAPI_ROOT and "
+            "FREETOKEN_SYCL_COMPILER_VERSION to the matching oneAPI install"
+        )
+    return str(include_dir)
+
+
+class FreeTokenBuildExtension(BuildExtension):
+    def build_extensions(self):
+        if ACCELERATOR == "xpu":
+            # The wheel's bundled headers must not shadow the explicitly selected
+            # compiler headers because SYCL header/runtime versions are ABI-coupled.
+            prefix_include = (Path(sys.prefix) / "include").resolve()
+            self.compiler.include_dirs = [
+                entry
+                for entry in self.compiler.include_dirs
+                if Path(entry).resolve() != prefix_include
+            ]
+        super().build_extensions()
+
+
 def _extensions():
     extensions = []
     if ACCELERATOR == "cuda":
@@ -64,6 +88,19 @@ def _extensions():
                 ),
             ]
         )
+    else:
+        extensions.append(
+            CppExtension(
+                name="freetoken.kernel._sycl_kernels",
+                sources=["python/freetoken/kernel/csrc/sycl/causal_conv1d.cpp"],
+                include_dirs=[_sycl_include_dir()],
+                library_dirs=[str(Path(sys.prefix) / "lib")],
+                runtime_library_dirs=[str(Path(sys.prefix) / "lib")],
+                libraries=["c10_xpu", "torch_xpu"],
+                extra_compile_args=["-O3", "-std=c++17", "-fsycl"],
+                extra_link_args=["-fsycl"],
+            )
+        )
     if sys.platform == "linux":
         extensions.append(
             CppExtension(
@@ -77,5 +114,5 @@ def _extensions():
 
 setup(
     ext_modules=_extensions(),
-    cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
+    cmdclass={"build_ext": FreeTokenBuildExtension.with_options(use_ninja=True)},
 )

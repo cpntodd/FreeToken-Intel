@@ -1,0 +1,27 @@
+from __future__ import annotations
+
+import torch
+
+
+def causal_conv1d_decode_sycl(
+    x: torch.Tensor,
+    conv_state: torch.Tensor,
+    weight: torch.Tensor,
+    conv_state_indices: torch.Tensor,
+) -> torch.Tensor:
+    try:
+        from freetoken.kernel import _sycl_kernels
+    except ImportError as error:
+        raise RuntimeError(
+            "the native SYCL extension is not installed; rebuild with "
+            "FREETOKEN_ACCELERATOR=xpu and the oneAPI icpx compiler"
+        ) from error
+    return _sycl_kernels.causal_conv1d_decode(
+        x,
+        conv_state,
+        weight,
+        conv_state_indices.to(dtype=torch.int32),
+    )
+
+
+__all__ = ["causal_conv1d_decode_sycl"]

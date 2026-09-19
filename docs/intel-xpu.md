@@ -60,6 +60,32 @@ Current constraints are explicit: one XPU only, eager execution only, and the po
 `torch` attention backend for FULL/SWA models. CUDA graphs, CUDA device identifiers, and
 tensor parallel XPU launches are rejected rather than silently falling back.
 
+## Native SYCL kernels
+
+The XPU build includes a native SYCL extension for the causal depthwise convolution
+used by gated-delta-network decode. It submits to PyTorch's current XPU queue, so tensor
+ownership and stream ordering remain inside the existing engine. FP32 and BF16 output
+and in-place state updates are validated on the Arc B580.
+
+Build the extension with an `icpx` compiler from the same oneAPI release as the SYCL
+runtime bundled by PyTorch. For the validated `torch==2.12.1+xpu` wheel, that is oneAPI
+2025.3. Mixing a 2026 compiler with the wheel's `libsycl.so.8` produces an incompatible
+extension even if compilation succeeds.
+
+```bash
+export ONEAPI_ROOT=/opt/intel/oneapi
+export FREETOKEN_SYCL_COMPILER_VERSION=2025.3
+export CXX="$ONEAPI_ROOT/compiler/2025.3/bin/icpx"
+FREETOKEN_ACCELERATOR=xpu \
+  .venv/bin/python setup.py build_ext --inplace
+PYTHONPATH=python \
+  .venv/bin/python -m pytest -q tests/accelerator/test_sycl_causal_conv1d.py
+```
+
+The build resolves headers from
+`$ONEAPI_ROOT/compiler/$FREETOKEN_SYCL_COMPILER_VERSION/include`. The extension fails
+explicitly when they are absent; it does not substitute a CPU implementation.
+
 ## OpenVINO compute islands
 
 Install `openvino==2026.4.0` to enable the optional bounded dense compute-island
