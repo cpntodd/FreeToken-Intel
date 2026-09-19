@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import functools
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -21,6 +21,7 @@ def torch_dtype(dtype: torch.dtype):
 
 
 def nvtx_annotate(name: str, layer_id_field: str | None = None):
+    import torch
     import torch.cuda.nvtx as nvtx
 
     def decorator(fn):
@@ -29,7 +30,8 @@ def nvtx_annotate(name: str, layer_id_field: str | None = None):
             display_name = name
             if layer_id_field and hasattr(self, layer_id_field):
                 display_name = name.format(getattr(self, layer_id_field))
-            with nvtx.range(display_name):
+            trace = nvtx.range(display_name) if torch.cuda.is_available() else nullcontext()
+            with trace:
                 return fn(self, *args, **kwargs)
 
         return wrapper

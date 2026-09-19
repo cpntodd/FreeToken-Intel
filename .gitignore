@@ -150,6 +150,10 @@ activemq-data/
 .env
 .envrc
 .venv
+.deps/
+experiments/vulkan/build/
+codegraph-cache/
+pyrightconfig.json
 env/
 venv/
 ENV/

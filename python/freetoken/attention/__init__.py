@@ -39,6 +39,19 @@ SUPPORTED_ATTENTION_BACKENDS = Registry[BackendCreator]("Attention Backend")
 
 
 @SUPPORTED_ATTENTION_BACKENDS.register(
+    "torch",
+    BackendInfo(
+        supported_types=frozenset({AttnType.FULL, AttnType.SWA}),
+        consumes_attn_spec=True,
+    ),
+)
+def create_torch_backend(config: ModelConfig):
+    from .torch import TorchAttentionBackend
+
+    return TorchAttentionBackend(config)
+
+
+@SUPPORTED_ATTENTION_BACKENDS.register(
     "trtllm",
     BackendInfo(
         supported_types=frozenset({AttnType.FULL}),

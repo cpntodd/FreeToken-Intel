@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Tuple
+from typing import TYPE_CHECKING
+
+import torch
 
 from .utils import KernelConfig, load_jit, make_cpp_args
 
 if TYPE_CHECKING:
-    import torch
     from tvm_ffi import Module
 
 DEFAULT_INDEX_KERNEL_CONFIG = KernelConfig(num_threads=128, max_occupancy=1, use_pdl=False)
@@ -43,10 +44,23 @@ def indexing(
     indices: torch.Tensor,
     *,
     output: torch.Tensor | None = None,
-    vocab_range: Tuple[int, int] | None = None,  # (start, length)
+    vocab_range: tuple[int, int] | None = None,  # (start, length)
 ) -> torch.Tensor:
     if output is None:
         output = weights.new_empty(indices.shape[0], weights.shape[1])
+
+    if weights.device.type != "cuda":
+        flat_indices = indices.reshape(-1).to(torch.long)
+        if vocab_range is None:
+            output.copy_(weights.index_select(0, flat_indices))
+            return output
+        start, length = vocab_range
+        local_indices = flat_indices - start
+        valid = (local_indices >= 0) & (local_indices < length)
+        safe_indices = local_indices.clamp(0, max(length - 1, 0))
+        output.copy_(weights.index_select(0, safe_indices))
+        output.mul_(valid.unsqueeze(1))
+        return output
 
     element_size = weights.shape[1] * weights.element_size()
     module = _jit_index_module(element_size, num_splits=num_splits_for(element_size))

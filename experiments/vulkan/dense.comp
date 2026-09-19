@@ -1,0 +1,28 @@
+#version 450
+
+layout(local_size_x = 16, local_size_y = 16, local_size_z = 1) in;
+
+layout(binding = 0) readonly buffer InputBuffer { float values[]; } input_data;
+layout(binding = 1) readonly buffer WeightBuffer { float values[]; } weight_data;
+layout(binding = 2) writeonly buffer OutputBuffer { float values[]; } output_data;
+
+layout(push_constant) uniform Dimensions {
+    uint rows;
+    uint input_size;
+    uint output_size;
+} dims;
+
+void main() {
+    uint row = gl_GlobalInvocationID.y;
+    uint column = gl_GlobalInvocationID.x;
+    if (row >= dims.rows || column >= dims.output_size) {
+        return;
+    }
+
+    float sum = 0.0;
+    for (uint k = 0; k < dims.input_size; ++k) {
+        sum += input_data.values[row * dims.input_size + k]
+            * weight_data.values[column * dims.input_size + k];
+    }
+    output_data.values[row * dims.output_size + column] = sum;
+}

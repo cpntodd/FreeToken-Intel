@@ -12,12 +12,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any
 
-from .reader import gguf_architecture, load_gguf_metadata, gguf_tensor_names
+from .reader import gguf_architecture, gguf_tensor_names, load_gguf_metadata
 
 # GGUF ``general.architecture`` -> FreeToken registry key (a GGUF-specific spec that
 # reuses the model classes but a GGUF parse_config / iter_weights).
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "gemma4": "Gemma4GGUFForCausalLM",
+    "llama": "LlamaGGUFForCausalLM",
 }
 
 
@@ -93,4 +94,4 @@ def build_gguf_shim(model_path: str) -> GgufConfigShim:
     )
 
 
-__all__ = ["GgufConfigShim", "GGUF_ARCH_TO_REGISTRY", "build_gguf_shim"]
+__all__ = ["GGUF_ARCH_TO_REGISTRY", "GgufConfigShim", "build_gguf_shim"]

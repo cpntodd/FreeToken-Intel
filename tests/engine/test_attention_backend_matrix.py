@@ -127,6 +127,24 @@ def test_auto_resolves_per_type(monkeypatch, kind, expected):
     assert config.attention_backend == expected
 
 
+def test_xpu_auto_selects_portable_torch_attention(monkeypatch):
+    from freetoken.engine.engine import _adjust_config
+
+    _patch_env(monkeypatch)
+    config = _config("full", accelerator="xpu", attention_backend="auto")
+    _adjust_config(config)
+    assert config.attention_backend == "torch"
+
+
+def test_xpu_rejects_cuda_attention_backend(monkeypatch):
+    from freetoken.engine.engine import _adjust_config
+
+    _patch_env(monkeypatch)
+    config = _config("full", accelerator="xpu", attention_backend="triton")
+    with pytest.raises(ValueError, match="requires --attention-backend torch"):
+        _adjust_config(config)
+
+
 def test_auto_bsa_sets_block_page_size(monkeypatch):
     # m3_sparse declares page_sizes=(128,): one KV page == one sparse block, and
     # config-time resolution must coerce the page size to match.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 from pathlib import Path
 
 import sys
@@ -33,47 +34,48 @@ def _cuda_runtime_paths() -> tuple[list[str], list[str]]:
     return [str(cuda_home / "include")], library_dirs
 
 
-cuda_include_dirs, cuda_library_dirs = _cuda_runtime_paths()
-_check_toolchain()
+ACCELERATOR = os.environ.get("FREETOKEN_ACCELERATOR", "cuda").lower()
+if ACCELERATOR not in {"cuda", "xpu"}:
+    raise RuntimeError("FREETOKEN_ACCELERATOR must be either 'cuda' or 'xpu'")
+
+
+def _extensions():
+    extensions = []
+    if ACCELERATOR == "cuda":
+        cuda_include_dirs, cuda_library_dirs = _cuda_runtime_paths()
+        _check_toolchain()
+        extensions.extend(
+            [
+                CppExtension(
+                    name="freetoken.kernel._pinned_tensor",
+                    sources=["python/freetoken/kernel/csrc/pinned_tensor.cpp"],
+                    include_dirs=cuda_include_dirs,
+                    library_dirs=cuda_library_dirs,
+                    libraries=["cudart"],
+                    extra_compile_args=["-O3", "-std=c++17"],
+                ),
+                CppExtension(
+                    name="freetoken.kernel._cpu_moe",
+                    sources=["python/freetoken/kernel/csrc/cpu_moe/cpu_moe_ext.cpp"],
+                    include_dirs=cuda_include_dirs,
+                    library_dirs=cuda_library_dirs,
+                    libraries=["cudart"],
+                    extra_compile_args=["-O3", "-std=c++17", "-pthread"],
+                ),
+            ]
+        )
+    if sys.platform == "linux":
+        extensions.append(
+            CppExtension(
+                name="freetoken.kernel._ple_store",
+                sources=["python/freetoken/kernel/csrc/ple_store/ple_store_ext.cpp"],
+                extra_compile_args=["-O3", "-std=c++17"],
+            )
+        )
+    return extensions
 
 
 setup(
-    ext_modules=[
-        CppExtension(
-            name="freetoken.kernel._pinned_tensor",
-            sources=[
-                "python/freetoken/kernel/csrc/pinned_tensor.cpp",
-            ],
-            include_dirs=cuda_include_dirs,
-            library_dirs=cuda_library_dirs,
-            libraries=["cudart"],
-            extra_compile_args=["-O3", "-std=c++17"],
-        ),
-        # CPU-compute MoE executor for --moe-backend cpu. Links cudart for the
-        # cudaLaunchHostFunc submit/sync graph nodes; the bf16 GEMV microkernels
-        # use per-function target attributes (avx512bf16/avx512f) + a runtime
-        # __builtin_cpu_supports dispatch, so the single binary stays portable
-        # (scalar fallback) -- no global -march is set.
-        CppExtension(
-            name="freetoken.kernel._cpu_moe",
-            sources=[
-                "python/freetoken/kernel/csrc/cpu_moe/cpu_moe_ext.cpp",
-            ],
-            include_dirs=cuda_include_dirs,
-            library_dirs=cuda_library_dirs,
-            libraries=["cudart"],
-            extra_compile_args=["-O3", "-std=c++17", "-pthread"],
-        ),
-        # --ple-backend disk row store; Linux-only until the TableFile/BatchReader seams grow Windows bodies
-        *([
-            CppExtension(
-                name="freetoken.kernel._ple_store",
-                sources=[
-                    "python/freetoken/kernel/csrc/ple_store/ple_store_ext.cpp",
-                ],
-                extra_compile_args=["-O3", "-std=c++17"],
-            )
-        ] if sys.platform == "linux" else []),
-    ],
+    ext_modules=_extensions(),
     cmdclass={"build_ext": BuildExtension.with_options(use_ninja=True)},
 )

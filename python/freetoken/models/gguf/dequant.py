@@ -23,6 +23,7 @@ GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
 GGML_Q8_0 = 8
+GGML_Q4_K = 12
 GGML_Q6_K = 14
 GGML_BF16 = 30
 
@@ -33,6 +34,7 @@ BLOCK_SHAPE: dict[int, tuple[int, int]] = {
     GGML_BF16: (1, 2),
     GGML_Q4_0: (32, 18),
     GGML_Q8_0: (32, 34),
+    GGML_Q4_K: (256, 144),
     GGML_Q6_K: (256, 210),
 }
 
@@ -42,6 +44,7 @@ GGML_NAME = {
     GGML_BF16: "BF16",
     GGML_Q4_0: "Q4_0",
     GGML_Q8_0: "Q8_0",
+    GGML_Q4_K: "Q4_K",
     GGML_Q6_K: "Q6_K",
 }
 
@@ -115,8 +118,50 @@ def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     return y.reshape(-1).to(out_dtype)
 
 
+def dequant_q4_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q4_K: 256 values with eight 6-bit scales/mins and packed 4-bit quants."""
+    raw = raw.reshape(-1, 144)
+    d = _f16_scales(raw, 0, 2)
+    dmin = _f16_scales(raw, 2, 4)
+    packed_scales = raw[:, 4:16].to(torch.int32)
+    qs = raw[:, 16:144]
+
+    scales = torch.empty((raw.shape[0], 8), dtype=torch.float32, device=raw.device)
+    mins = torch.empty_like(scales)
+    for index in range(8):
+        if index < 4:
+            scales[:, index] = (packed_scales[:, index] & 0x3F).to(torch.float32)
+            mins[:, index] = (packed_scales[:, index + 4] & 0x3F).to(torch.float32)
+        else:
+            scales[:, index] = (
+                (packed_scales[:, index + 4] & 0x0F)
+                | ((packed_scales[:, index - 4] >> 6) << 4)
+            ).to(torch.float32)
+            mins[:, index] = (
+                (packed_scales[:, index + 4] >> 4)
+                | ((packed_scales[:, index] >> 6) << 4)
+            ).to(torch.float32)
+
+    output = torch.empty((raw.shape[0], 256), dtype=torch.float32, device=raw.device)
+    for group in range(4):
+        packed = qs[:, group * 32 : (group + 1) * 32]
+        low = (packed & 0x0F).to(torch.float32)
+        high = (packed >> 4).to(torch.float32)
+        first = group * 2
+        output[:, group * 64 : group * 64 + 32] = (
+            d * scales[:, first : first + 1] * low
+            - dmin * mins[:, first : first + 1]
+        )
+        output[:, group * 64 + 32 : (group + 1) * 64] = (
+            d * scales[:, first + 1 : first + 2] * high
+            - dmin * mins[:, first + 1 : first + 2]
+        )
+    return output.reshape(-1).to(out_dtype)
+
+
 _DEQUANT = {
     GGML_Q4_0: dequant_q4_0,
+    GGML_Q4_K: dequant_q4_k,
     GGML_Q6_K: dequant_q6_k,
 }
 
@@ -138,16 +183,18 @@ def dequantize(raw: torch.Tensor, ggml_type: int, out_dtype: torch.dtype) -> tor
 
 
 __all__ = [
-    "GGML_F32",
-    "GGML_F16",
-    "GGML_BF16",
-    "GGML_Q4_0",
-    "GGML_Q8_0",
-    "GGML_Q6_K",
-    "GGML_NAME",
     "BLOCK_SHAPE",
-    "row_bytes",
+    "GGML_BF16",
+    "GGML_F16",
+    "GGML_F32",
+    "GGML_NAME",
+    "GGML_Q4_0",
+    "GGML_Q4_K",
+    "GGML_Q6_K",
+    "GGML_Q8_0",
     "dequant_q4_0",
+    "dequant_q4_k",
     "dequant_q6_k",
     "dequantize",
+    "row_bytes",
 ]

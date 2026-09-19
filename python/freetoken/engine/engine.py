@@ -10,6 +10,7 @@ from typing import Any, Dict, Iterable, NamedTuple, Tuple
 
 import torch
 from freetoken.attention import AttnType, attention_backend_info, create_attention_backend
+from freetoken.accelerator import resolve_runtime
 from freetoken.core import Batch, Context, Req, set_global_ctx
 from freetoken.distributed import destroy_distributed, enable_pynccl_distributed, set_tp_info
 from freetoken.gpu_select import gpu_identity
@@ -26,7 +27,7 @@ from freetoken.moe.offload_cache import OffloadMoeCache, attach_offload_moe_cach
 from freetoken.utils import align_ceil, init_logger, is_sm90_family, is_sm100_family, mem_GB, torch_dtype
 
 from .config import EngineConfig
-from .graph import GraphRunner, get_free_memory
+from .graph import GraphRunner
 from .sample import BatchSamplingArgs, Sampler
 from freetoken.kvcache import create_kv_pool, resolve_pool_class
 from freetoken.kvcache.base import CacheRebuildRejected
@@ -305,6 +306,38 @@ def _materialize_loaded_weight_state_dict(
     *,
     device: torch.device,
 ) -> Dict[str, torch.Tensor]:
+    def move(
+        key: str, weight: torch.Tensor, dtype: torch.dtype | None = None
+    ) -> torch.Tensor:
+        if dtype is not None and weight.dtype != dtype:
+            weight = weight.to(dtype=dtype)
+        if device.type != "xpu":
+            return weight.to(device=device)
+
+        # Large host-to-device copies fail on the B580 Level Zero path with
+        # UR_RESULT_ERROR_OUT_OF_DEVICE_MEMORY even when >10 GiB is free. Small,
+        # synchronized copies avoid the driver's oversized staging allocation.
+        result = torch.empty(weight.shape, dtype=weight.dtype, device=device)
+        # GGUF tensors are read-only mmap views. Copy them to ordinary writable
+        # host storage first: repeatedly registering distinct mmap ranges for
+        # Level Zero transfers eventually fails despite abundant device memory.
+        source, target = weight.clone().view(-1), result.view(-1)
+        chunk_elements = max(1, (1 << 20) // weight.element_size())
+        for start in range(0, source.numel(), chunk_elements):
+            try:
+                target[start : start + chunk_elements].copy_(
+                    source[start : start + chunk_elements]
+                )
+                torch.xpu.synchronize(device)
+            except RuntimeError as exc:
+                free, total = torch.xpu.mem_get_info(device)
+                raise RuntimeError(
+                    f"XPU upload failed for {key} at byte "
+                    f"{start * weight.element_size()} "
+                    f"({free} of {total} device bytes free): {exc}"
+                ) from exc
+        return result
+
     state_dict: Dict[str, torch.Tensor] = {}
     for key, weight in weights:
         expected = model_state.get(key)
@@ -312,32 +345,39 @@ def _materialize_loaded_weight_state_dict(
             # NOTE: the quant scheme may declare no input_scale for a layer whose FTW still stores one
             if key.endswith(".input_scale"):
                 continue
-            state_dict[key] = weight.to(device=device)
+            state_dict[key] = move(key, weight)
         else:
-            state_dict[key] = weight.to(device=device, dtype=expected.dtype)
+            state_dict[key] = move(key, weight, expected.dtype)
     return state_dict
 
 
 class ForwardOutput(NamedTuple):
     next_tokens_gpu: torch.Tensor
     next_tokens_cpu: torch.Tensor
-    copy_done_event: torch.cuda.Event
+    copy_done_event: Any
 
 
 class Engine:
     def __init__(self, config: EngineConfig):
-        assert not torch.cuda.is_initialized()
+        self.runtime = resolve_runtime(config.accelerator)
+        object.__setattr__(config, "accelerator", self.runtime.kind)
+        assert not self.runtime.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
         set_quant_backend(_adjust_ftw_quant_backend(config.model_path, QuantBackend.parse(config.quant_backend)))
-        _ensure_expandable_segments()  # before the first CUDA allocation below
+        if self.runtime.kind == "cuda":
+            _ensure_expandable_segments()  # before the first CUDA allocation below
+            from freetoken.gpu_select import bind_assigned_gpu
 
-        from freetoken.gpu_select import bind_assigned_gpu
-
-        self.device = bind_assigned_gpu(config.tp_info.rank)
+            self.device = bind_assigned_gpu(config.tp_info.rank)
+        else:
+            self.device = self.runtime.device(config.tp_info.rank)
+            self.runtime.set_device(self.device)
+            object.__setattr__(config, "cuda_graph_bs", [])
+            object.__setattr__(config, "cuda_graph_max_bs", 0)
         _adjust_config(config)
         torch.manual_seed(42)
-        self.stream = torch.cuda.Stream()
-        torch.cuda.set_stream(self.stream)
+        self.stream = self.runtime.stream()
+        self.runtime.set_stream(self.stream)
         self.dtype = config.dtype
         self.config = config  # retained for runtime cache rebuild (rebuild_runtime_cache)
         # KV pool family fixed at construction from the model config: its classmethods own the
@@ -558,7 +598,7 @@ class Engine:
         for item in self.mm_processor.dummy_items(self.dtype, self.device):
             if item.modality in self.config.served_modalities:
                 self.model.encode(item)
-        torch.cuda.synchronize(self.device)
+        self.runtime.synchronize(self.device)
 
     @torch.inference_mode()
     def _run_mm_encoder(self, batch: Batch) -> None:
@@ -810,10 +850,10 @@ class Engine:
 
     def _sync_get_memory(self) -> Tuple[int, int]:
         """Get the min and max free memory across TP ranks."""
-        torch.cuda.synchronize(self.device)
-        torch.cuda.empty_cache()
-        torch.cuda.reset_peak_memory_stats(self.device)
-        free_memory = get_free_memory(self.device)
+        self.runtime.synchronize(self.device)
+        self.runtime.empty_cache()
+        self.runtime.reset_peak_memory_stats(self.device)
+        free_memory = self.runtime.memory_info(self.device)[0]
         free_mem_tensor = torch.tensor([free_memory, -free_memory], device="cpu", dtype=torch.int64)
         torch.distributed.all_reduce(
             free_mem_tensor, op=torch.distributed.ReduceOp.MIN, group=self.tp_cpu_group
@@ -958,7 +998,7 @@ class Engine:
             ),
         )
 
-        torch.cuda.synchronize(self.device)
+        self.runtime.synchronize(self.device)
         # Preserve the CUDA-graph batch-size set resolved at startup. The auto heuristic keys
         # off free memory, which is far smaller now that the caches are resident (post-cache
         # free << startup pre-load free), so re-deriving it here would silently drop large
@@ -1018,7 +1058,7 @@ class Engine:
         )
 
     def forward_batch(self, batch: Batch, args: BatchSamplingArgs) -> ForwardOutput:
-        assert torch.cuda.current_stream() == self.stream
+        assert self.runtime.current_stream() == self.stream
         if batch.mm_gather_plan:
             self._run_mm_encoder(batch)
         use_graph = self.graph_runner.can_use_cuda_graph(batch)
@@ -1035,7 +1075,7 @@ class Engine:
         batch_logits = logits[: batch.size]
         next_tokens_gpu = self.sampler.sample(batch_logits, args).to(torch.int32)
         next_tokens_cpu = next_tokens_gpu.to("cpu", non_blocking=True)
-        copy_done_event = torch.cuda.Event()
+        copy_done_event = self.runtime.event()
         copy_done_event.record(self.stream)
         return ForwardOutput(next_tokens_gpu, next_tokens_cpu, copy_done_event)
 
@@ -1060,8 +1100,8 @@ class Engine:
 
         dummy_row = self.page_table[self.dummy_req.table_idx]
         dummy_slot = int(dummy_row[0].item())
-        started = torch.cuda.Event(enable_timing=True)
-        ended = torch.cuda.Event(enable_timing=True)
+        started = self.runtime.event(enable_timing=True)
+        ended = self.runtime.event(enable_timing=True)
         started.record(self.stream)
         try:
             for length in warmup_lens:
@@ -1094,7 +1134,7 @@ class Engine:
             if self.moe_offload_cache is not None:
                 self.moe_offload_cache.reset()
         ended.record(self.stream)
-        torch.cuda.synchronize(self.device)
+        self.runtime.synchronize(self.device)
         logger.info_rank0(
             f"Prefill warmup complete for lengths {warmup_lens} "
             f"in {started.elapsed_time(ended) / 1000.0:.3f} s"
@@ -1553,11 +1593,19 @@ def _adjust_config(config: EngineConfig):
             "W8A16 fold is only validated exact in bfloat16); use bfloat16."
         )
     if config.attention_backend == "auto":
-        override(
-            "attention_backend",
-            _resolve_auto_attention_backend(required_attn_types),
-        )
+        if config.accelerator == "xpu":
+            override("attention_backend", "torch")
+        else:
+            override(
+                "attention_backend",
+                _resolve_auto_attention_backend(required_attn_types),
+            )
         logger.info_rank0(f"Auto-selected attention backend: {config.attention_backend}")
+    if config.accelerator == "xpu" and config.attention_backend != "torch":
+        raise ValueError(
+            "the XPU eager path currently requires --attention-backend torch; "
+            f"got {config.attention_backend!r}"
+        )
     _validate_attention_backend_choice(config, override, required_attn_types)
 
     if config.moe_cache_rate is not None:
@@ -1783,6 +1831,17 @@ def _adjust_config(config: EngineConfig):
                 "out of bounds; extend the checkpoint's rope_scaling / "
                 "max_position_embeddings in config.json instead."
             )
+        # Do not allocate the checkpoint's full RoPE table when the serving
+        # ceiling is deliberately smaller. Long-context Gemma 4 advertises
+        # 262k positions; materializing both full and SWA tables would consume
+        # roughly 0.75 GiB before a single weight reaches a 12 GiB Arc GPU.
+        rotary_configs = {id(rotary): rotary}
+        for group in model_config.attention_groups:
+            group_rotary = getattr(group, "rotary_config", None)
+            if group_rotary is not None:
+                rotary_configs[id(group_rotary)] = group_rotary
+        for rope_config in rotary_configs.values():
+            object.__setattr__(rope_config, "max_position", seq_override)
 
     # The startup ServerArgs dump is the *requested* config, printed in the frontend process
     # before any of the resolution above ran -- so "moe_strategy='auto'" is all it can say. This

@@ -273,6 +273,16 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--accelerator",
+        choices=["auto", "cuda", "xpu"],
+        default=ServerArgs.accelerator,
+        help=(
+            "Execution accelerator. 'auto' preserves CUDA priority and otherwise selects "
+            "an available Intel XPU; explicit selections never fall back to another backend."
+        ),
+    )
+
+    parser.add_argument(
         "--tensor-parallel-size",
         "--tp-size",
         type=int,

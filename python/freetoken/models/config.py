@@ -314,6 +314,10 @@ class ModelConfig:
     has_attn_bias: bool = False
     has_router_bias: bool = False
     moe_weight_format: str | None = None
+    # Native GGUF packed types for model projections and token embeddings. None
+    # means this is not a direct-GGUF model.
+    gguf_weight_type: int | None = None
+    gguf_embedding_type: int | None = None
     swiglu_limit: float | None = None
     hidden_act_alpha: float = 1.702
     # Full DeepseekV4Args payload for the DSV4-specific machinery (MLA sparse attention,

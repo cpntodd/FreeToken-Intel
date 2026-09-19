@@ -25,6 +25,10 @@ import triton
 import triton.language as tl
 
 
+def _is_supported_gpu_tensor(tensor: torch.Tensor) -> bool:
+    return tensor.device.type in {"cuda", "xpu"}
+
+
 @triton.jit(do_not_specialize=["nnz"])
 def _rope_tiled(
     Q, K, POS, CACHE,
@@ -102,7 +106,7 @@ def apply_rope_with_cos_sin_cache_inplace(
     """Drop-in for the vendored op; rotates query/key in place."""
     if str(cos_sin_cache.dtype) != "torch.float32":
         raise ValueError("cos_sin_cache should be float32")
-    assert query.is_cuda and key.is_cuda and positions.is_cuda
+    assert all(_is_supported_gpu_tensor(t) for t in (query, key, positions))
     assert cos_sin_cache.is_contiguous()
 
     nnz = query.shape[0]
@@ -209,7 +213,7 @@ def apply_mrope_with_cos_sin_cache_inplace(
     if str(cos_sin_cache.dtype) != "torch.float32":
         raise ValueError("cos_sin_cache should be float32")
     assert positions.dim() == 2 and positions.shape[0] == 3
-    assert query.is_cuda and key.is_cuda and positions.is_cuda
+    assert all(_is_supported_gpu_tensor(t) for t in (query, key, positions))
     assert cos_sin_cache.is_contiguous() and positions.is_contiguous()
 
     nnz = query.shape[0]

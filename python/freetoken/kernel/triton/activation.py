@@ -126,11 +126,30 @@ def _act_and_mul(
     alpha: float = 0.0,
     limit: float = 0.0,
 ):
-    assert x.is_cuda and x.is_contiguous()
+    assert x.device.type in {"cuda", "xpu"} and x.is_contiguous()
     d = x.shape[-1] // 2
     out_shape = x.shape[:-1] + (d,)
     if out is None:
         out = torch.empty(out_shape, device=x.device, dtype=x.dtype)
+    if x.device.type == "xpu":
+        import torch.nn.functional as F
+
+        gate, up = x[..., :d], x[..., d:]
+        if kind == SILU:
+            value = F.silu(gate) * up
+        elif kind == GELU:
+            value = F.gelu(gate, approximate="none") * up
+        elif kind == GELU_TANH:
+            value = F.gelu(gate, approximate="tanh") * up
+        elif kind in {SWIGLUOAI, SWIGLU_CLAMP}:
+            gate = gate.clamp(max=limit)
+            up = up.clamp(min=-limit, max=limit)
+            value = gate * torch.sigmoid(alpha * gate)
+            value = value * (up + 1.0 if kind == SWIGLUOAI else up)
+        else:
+            raise ValueError(f"unknown activation kind {kind}")
+        out.copy_(value)
+        return out
     x2 = x.reshape(-1, x.shape[-1])
     o2 = out.reshape(-1, d)
     M = x2.shape[0]

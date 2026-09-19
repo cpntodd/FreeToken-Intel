@@ -23,6 +23,7 @@ class EngineConfig:
     model_path: str
     tp_info: DistributedInfo
     dtype: torch.dtype
+    accelerator: str = "auto"
     max_running_req: int = 4
     attention_backend: str = "auto"
     moe_strategy: str = "auto"
@@ -93,13 +94,20 @@ class EngineConfig:
     mm: MultimodalConfig = field(default_factory=MultimodalConfig)
 
     def __post_init__(self):
-        if self.moe_backend is None:
-            return
-        if self.moe_strategy != "auto":
-            raise ValueError("moe_backend is the old name of moe_strategy; pass only moe_strategy")
-        logger.warning("EngineConfig.moe_backend is deprecated; use moe_strategy")
-        object.__setattr__(self, "moe_strategy", self.moe_backend)
-        object.__setattr__(self, "moe_backend", None)
+        if self.accelerator not in {"auto", "cuda", "xpu"}:
+            raise ValueError("accelerator must be one of: auto, cuda, xpu")
+        if self.accelerator == "xpu" and self.tp_info.size != 1:
+            raise ValueError(
+                "the XPU backend currently supports single-GPU inference only"
+            )
+        if self.moe_backend is not None:
+            if self.moe_strategy != "auto":
+                raise ValueError(
+                    "moe_backend is the old name of moe_strategy; pass only moe_strategy"
+                )
+            logger.warning("EngineConfig.moe_backend is deprecated; use moe_strategy")
+            object.__setattr__(self, "moe_strategy", self.moe_backend)
+            object.__setattr__(self, "moe_backend", None)
 
     @cached_property
     def hf_config(self):
@@ -131,7 +139,7 @@ class EngineConfig:
         built = {e.config_key for e in self.active_encoders}
         for key in set(ENCODER_SECTIONS) | {e.config_key for e in self.model_spec.encoders}:
             if key not in built:
-                setattr(hf_config, key, None)
+                object.__setattr__(hf_config, key, None)
         spec = self.model_spec
         quant = checkpoint_quant_config(self.model_path, hf_config, spec)
         set_quant_config(quant)

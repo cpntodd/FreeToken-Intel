@@ -49,3 +49,15 @@ def test_proportional_rope_matches_llama_cpp_rope_freqs_division():
     freqs = torch.outer(torch.arange(max_position, dtype=torch.float), theta / rope_freqs)
     expected = torch.cat((freqs.cos(), freqs.sin()), dim=-1)
     torch.testing.assert_close(rope._cos_sin_cache, expected, rtol=0, atol=1e-6)
+
+
+@pytest.mark.skipif(not glob.glob(GGUF_GLOB), reason="FREETOKEN_GEMMA4_GGUF_GLOB not set to a local gemma4 GGUF")
+def test_dense_gguf_config_does_not_require_moe_metadata():
+    from freetoken.models.gemma4.gguf import parse_gguf_config
+
+    config = parse_gguf_config(_shim(glob.glob(GGUF_GLOB)[0])[0])
+
+    assert config.is_moe is False
+    assert config.num_experts == 0
+    assert config.gguf_weight_type is not None
+    assert config.gguf_embedding_type is not None

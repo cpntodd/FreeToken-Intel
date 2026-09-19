@@ -69,9 +69,10 @@ class Scheduler(SchedulerIOMixin):
 
         # use another stream to overlap metadata processing with computation
         self.device = self.engine.device
-        self.stream = torch.cuda.Stream(device=self.device)
-        self.engine_stream_ctx = torch.cuda.stream(self.engine.stream)
-        torch.cuda.set_stream(self.stream)
+        self.runtime = self.engine.runtime
+        self.stream = self.runtime.stream()
+        self.engine_stream_ctx = self.runtime.stream_context(self.engine.stream)
+        self.runtime.set_stream(self.stream)
         # sent on the readiness ack for /v1/stats gpus; a list so TP can add one entry per rank
         self.gpus = [gpu_identity(self.device.index)] if self.device.type == "cuda" else []
 
@@ -173,7 +174,7 @@ class Scheduler(SchedulerIOMixin):
         """
         assert not self.prefill_manager.runnable, "rebuild requires no pending prefill"
         assert not self.decode_manager.runnable, "rebuild requires no running decode"
-        torch.cuda.synchronize(self.device)
+        self.runtime.synchronize(self.device)
         if self.config.tp_info.size > 1:
             self.sync_all_ranks()
         self.engine.rebuild_runtime_cache(
@@ -299,13 +300,13 @@ class Scheduler(SchedulerIOMixin):
                 while True:
                     self.normal_loop()
         else:
-            assert torch.cuda.current_stream() == self.stream
+            assert self.runtime.current_stream() == self.stream
             data = None
             while True:
                 data = self.overlap_loop(data)
 
     def shutdown(self) -> None:
-        torch.cuda.synchronize(self.device)
+        self.runtime.synchronize(self.device)
         self.sync_all_ranks()
         self.engine.shutdown()
 
@@ -482,7 +483,7 @@ class Scheduler(SchedulerIOMixin):
         pool: weights + KV + MoE cache + graphs). 0 on CPU. Cheap, no device sync."""
         if self.device.type != "cuda":
             return 0
-        return torch.cuda.memory_reserved(self.device)
+        return self.runtime.memory_reserved(self.device)
 
     def _process_one_msg(self, msg: BaseBackendMsg) -> None:
         if isinstance(msg, BatchBackendMsg):

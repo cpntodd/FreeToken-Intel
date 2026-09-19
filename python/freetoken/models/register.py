@@ -91,6 +91,12 @@ _MODEL_REGISTRY: dict[str, ModelSpec] = {
         "LlamaForCausalLM",
         packed_modules_mapping=_DENSE_PACKED,
     ),
+    "LlamaGGUFForCausalLM": ModelSpec(
+        "freetoken.models.llama",
+        "LlamaForCausalLM",
+        parse_config="parse_gguf_config",
+        iter_weights="iter_gguf_weights",
+    ),
     "Qwen2ForCausalLM": ModelSpec(
         "freetoken.models.qwen2",
         "Qwen2ForCausalLM",
@@ -337,4 +343,4 @@ def get_model_class(model_architecture: str, model_config: ModelConfig):
     return model_cls(model_config)
 
 
-__all__ = ["ModelSpec", "checkpoint_quant_config", "get_model_spec", "get_model_class"]
+__all__ = ["ModelSpec", "checkpoint_quant_config", "get_model_class", "get_model_spec"]

@@ -59,12 +59,25 @@ def _run_scheduler(args: ServerArgs, ack_queue: mp.Queue[str]) -> None:
     if args.shell_mode:
         _detach_process_group()
 
-    # published (not bound) here: the engine binds it after the allocator setup
-    from freetoken.gpu_select import set_assigned_gpu
+    from freetoken.accelerator import resolve_runtime, validate_runtime_request
 
-    # resolved UUIDs when we have them, the raw --gpu entries when NVML could not resolve them, else one CUDA ordinal per rank
-    targets = args.gpu_assigned or args.gpu or tuple(str(r) for r in range(args.tp_info.size))
-    set_assigned_gpu(targets[args.tp_info.rank])
+    runtime = resolve_runtime(args.accelerator)
+    validate_runtime_request(
+        runtime,
+        tensor_parallel_size=args.tp_info.size,
+        has_cuda_device_ids=bool(args.gpu),
+    )
+    args = replace(args, accelerator=runtime.kind)
+    if runtime.kind == "cuda":
+        # Published (not bound) here: the engine binds it after allocator setup.
+        from freetoken.gpu_select import set_assigned_gpu
+
+        targets = (
+            args.gpu_assigned
+            or args.gpu
+            or tuple(str(rank) for rank in range(args.tp_info.size))
+        )
+        set_assigned_gpu(targets[args.tp_info.rank])
 
     import torch
     from freetoken.scheduler import Scheduler
@@ -136,6 +149,13 @@ def launch_server(
         prog=prog,
     )
     logger = init_logger(__name__, "initializer")
+
+    if server_args.gpu and server_args.accelerator == "xpu":
+        raise SystemExit(
+            f"{prog or 'ft serve'}: error: --gpu cannot be used with --accelerator xpu"
+        )
+    if server_args.gpu and server_args.accelerator == "auto":
+        server_args = replace(server_args, accelerator="cuda")
 
     if server_args.gpu:
         # resolve here so a typo is one clear error before any worker spawns

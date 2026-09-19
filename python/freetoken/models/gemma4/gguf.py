@@ -72,6 +72,19 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
     full_head_dim = int(g("attention.key_length"))
     swa_kv = int(kv_per_layer[swa_layer_ids[0]]) if swa_layer_ids else int(kv_per_layer[0])
     full_kv = int(kv_per_layer[full_layer_ids[0]]) if full_layer_ids else int(kv_per_layer[0])
+    num_experts = int(m.get("gemma4.expert_count") or 0)
+    is_moe = num_experts > 0
+
+    weight_type, embedding_type = GGML_Q4_0, GGML_Q6_K
+    from freetoken.models.gguf.reader import iter_gguf_tensors
+
+    for tensor in iter_gguf_tensors(shim.model_path):
+        if tensor.name == "token_embd.weight":
+            embedding_type = tensor.ggml_type
+        elif tensor.name == "blk.0.attn_q.weight":
+            weight_type = tensor.ggml_type
+        if embedding_type != GGML_Q6_K and weight_type != GGML_Q4_0:
+            break
 
     max_pos = int(g("context_length"))
     full_rotary = RotaryConfig(
@@ -105,15 +118,17 @@ def parse_gguf_config(shim: "GgufConfigShim") -> ModelConfig:
         rms_norm_eps=float(g("attention.layer_norm_rms_epsilon")),
         tie_word_embeddings=bool(shim.tie_word_embeddings),
         rotary_config=full_rotary,
-        num_experts=int(g("expert_count")),
-        num_experts_per_tok=int(g("expert_used_count")),
-        moe_intermediate_size=int(g("expert_feed_forward_length")),
+        num_experts=num_experts,
+        num_experts_per_tok=int(m.get("gemma4.expert_used_count") or 0),
+        moe_intermediate_size=int(m.get("gemma4.expert_feed_forward_length") or 0),
         norm_topk_prob=True,
         model_type="gemma4",
         architectures=list(shim.architectures),
-        moe_enabled=True,
-        expert_quant="q4_0",
-        moe_weight_format="q4_0",
+        moe_enabled=is_moe,
+        expert_quant="q4_0" if is_moe else "none",
+        moe_weight_format="q4_0" if is_moe else None,
+        gguf_weight_type=weight_type,
+        gguf_embedding_type=embedding_type,
         use_qk_norm=True,
         attn_sm_scale=1.0,
         final_logit_softcapping=float(g("final_logit_softcapping")),
@@ -203,16 +218,17 @@ def iter_gguf_weights(
     from freetoken.models.gguf.reader import iter_gguf_tensors
     from freetoken.utils import cached_load_hf_config
 
-    assert not include_moe_experts, (
-        "gemma4 GGUF stores experts as Q4_0 and only supports the offload backend; "
-        "experts are loaded into the offload cache via load_q4_0_expert_sources()."
-    )
     assert include_non_moe
     _require_tp1("weight loading")
 
     # Full-attention layers ship no attn_v (k reused as v); SWA layers do. Knowing which
     # is which lets us emit the fused qkv as soon as its parts are present.
     config = parse_gguf_config(cached_load_hf_config(model_path))
+    if config.is_moe:
+        assert not include_moe_experts, (
+            "gemma4 GGUF stores experts as Q4_0 and only supports the offload backend; "
+            "experts are loaded into the offload cache via load_q4_0_expert_sources()."
+        )
     k_eq_v_layers = {
         lid
         for lid in range(config.num_layers)
@@ -305,7 +321,7 @@ def iter_gguf_weights(
 
 def is_gguf_model(config: ModelConfig) -> bool:
     """True when the model was parsed from a GGUF checkpoint (native-quant path)."""
-    return getattr(config, "moe_weight_format", None) == "q4_0"
+    return config.gguf_weight_type is not None
 
 
 class GGUFTiedLMHead:
@@ -347,7 +363,10 @@ def convert_gemma4_to_gguf(model, config: ModelConfig) -> None:
     """
     from freetoken.layers.gguf import GGUFEmbedding, GGUFLinear
 
-    def swap_linear(owner, attr, quant_type=GGML_Q4_0):
+    assert config.gguf_weight_type is not None
+    assert config.gguf_embedding_type is not None
+
+    def swap_linear(owner, attr, quant_type=config.gguf_weight_type):
         lin = getattr(owner, attr)
         out_features, in_features = lin.weight.shape
         setattr(
@@ -360,7 +379,7 @@ def convert_gemma4_to_gguf(model, config: ModelConfig) -> None:
     embed = GGUFEmbedding(
         num_embeddings=config.vocab_size,
         embedding_dim=config.hidden_size,
-        quant_type=GGML_Q6_K,
+        quant_type=config.gguf_embedding_type,
         embed_scale=config.embedding_scale,
     )
     inner.embed_tokens = embed
@@ -372,7 +391,7 @@ def convert_gemma4_to_gguf(model, config: ModelConfig) -> None:
         swap_linear(layer.feed_forward.shared_mlp, "down_proj")
 
     if config.tie_word_embeddings:
-        model.lm_head = GGUFTiedLMHead(embed, GGML_Q6_K)
+        model.lm_head = GGUFTiedLMHead(embed, config.gguf_embedding_type)
 
 
 # --------------------------------------------------------------------------------------

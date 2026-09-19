@@ -3,10 +3,11 @@ from __future__ import annotations
 import functools
 from typing import TYPE_CHECKING
 
+import torch
+
 from .utils import KernelConfig, load_jit, make_cpp_args
 
 if TYPE_CHECKING:
-    import torch
     from tvm_ffi import Module
 
 DEFAULT_INDEX_KERNEL_CONFIG = KernelConfig(num_threads=128, max_occupancy=1, use_pdl=False)
@@ -37,6 +38,11 @@ def store_cache(
     num_tokens = k_cache.shape[0]
     k_cache = k_cache.view(num_tokens, -1)
     v_cache = v_cache.view(num_tokens, -1)
+    if k_cache.device.type == "xpu":
+        locations = indices.to(torch.int64)
+        k_cache.index_copy_(0, locations, k.view(locations.numel(), -1))
+        v_cache.index_copy_(0, locations, v.view(locations.numel(), -1))
+        return
     element_size = k_cache.shape[1] * k_cache.element_size()
     module = _jit_store_module(element_size)
     module.launch(k_cache, v_cache, indices, k, v)
