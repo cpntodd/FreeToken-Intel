@@ -149,6 +149,7 @@ def test_rebuild_cache_refreshes_prefill_budget(monkeypatch):
     sched.prefill_manager = SimpleNamespace(runnable=False)
     sched.decode_manager = SimpleNamespace(runnable=False)
     sched.device = torch.device("cpu")
+    sched.runtime = SimpleNamespace(synchronize=lambda device: None)
     sched.config = SimpleNamespace(tp_info=SimpleNamespace(size=1), max_extend_tokens=100_000)
     sched.engine = SimpleNamespace(
         rebuild_runtime_cache=lambda **kw: None, num_pages=32, page_table=None

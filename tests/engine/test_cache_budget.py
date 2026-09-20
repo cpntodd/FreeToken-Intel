@@ -133,6 +133,7 @@ def _dsv4_adjust_cfg(**over):
     )
 
     class Cfg:
+        accelerator = "auto"
         moe_cache_auto = True
         moe_cache_size = 0
         moe_cache_rate = None
@@ -208,6 +209,7 @@ def test_adjust_config_resolves_num_tokens_generic():
     )
 
     class Cfg:
+        accelerator = "auto"
         moe_cache_auto = False
         moe_cache_size = 0
         moe_cache_rate = None
@@ -217,7 +219,7 @@ def test_adjust_config_resolves_num_tokens_generic():
         cuda_graph_bs = [1, 2]
         max_seq_len = 1024
         page_size = 1
-        attention_backend = "fi"
+        attention_backend = "triton"
         num_page_override = None
         num_token_override = 5000
 
@@ -354,7 +356,7 @@ def _offload_engine_config(**overrides):
         model_path="/tmp/freetoken-test-model",
         tp_info=DistributedInfo(rank=0, size=1),
         dtype=torch.bfloat16,
-        attention_backend="fi",
+        attention_backend="triton",
         **overrides,
     )
     object.__setattr__(
@@ -436,10 +438,12 @@ def _generic_rotary_cfg(max_position, override):
     model_config = SimpleNamespace(
         single_stream_only=False, is_moe=False, expert_quant="none",
         has_swa_attention=False, has_linear_attention=False,
+        attention_groups=[],
         rotary_config=SimpleNamespace(max_position=max_position),
     )
 
     class Cfg:
+        accelerator = "auto"
         moe_cache_auto = False
         moe_cache_size = 0
         moe_cache_rate = None
