@@ -507,7 +507,14 @@ The serving integration is experimental and limited to the dense
 `model.layers.0.self_attn.qkv_proj` operation in Llama. The GGUF loader materializes
 that weight as dense BF16; the island compiles after model loading, only when explicitly
 selected, and defaults to a 64-token invocation limit with no fallback. A longer prefill
-raises unless XPU fallback is explicitly enabled. To try it on the tested B580:
+raises unless XPU fallback is explicitly enabled.
+
+The island accepts only unquantized FP16/BF16/FP32 matrices; checkpoint quantization
+metadata (including FP8 side scales) is rejected, even with `fallback=xpu`, because the
+island's direct fallback cannot apply those scales. Leave the island disabled for those
+checkpoints.
+
+To try it on the tested B580:
 
 ```bash
 FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \

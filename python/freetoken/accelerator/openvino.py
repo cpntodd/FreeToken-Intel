@@ -47,6 +47,7 @@ class OpenVINODenseIsland:
         device: str = "GPU",
         fallback: FallbackPolicy = "none",
         core: Any | None = None,
+        quant_config: Any | None = None,
     ) -> None:
         if max_batch_tokens <= 0:
             raise ValueError("max_batch_tokens must be positive")
@@ -58,6 +59,12 @@ class OpenVINODenseIsland:
             raise ValueError("OpenVINO compute islands require an explicit GPU device")
         if weight.ndim != 2:
             raise ValueError("weight must have shape [out_features, in_features]")
+        if quant_config is not None:
+            raise ValueError("OpenVINO dense islands do not support quantized weights")
+        if weight.dtype not in (torch.float16, torch.bfloat16, torch.float32):
+            raise ValueError(
+                "weight must use float16, bfloat16, or float32 dense storage"
+            )
         if bias is not None and tuple(bias.shape) != (weight.shape[0],):
             raise ValueError("bias must have shape [out_features]")
 

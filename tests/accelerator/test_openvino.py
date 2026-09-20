@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import builtins
 import importlib.util
+from types import SimpleNamespace
 
 import pytest
 import torch
@@ -12,6 +13,42 @@ from freetoken.accelerator.openvino import OpenVINODenseIsland
 def test_openvino_island_rejects_cpu_device():
     with pytest.raises(ValueError, match="explicit GPU"):
         OpenVINODenseIsland(torch.ones(4, 8), max_batch_tokens=2, device="CPU")
+
+
+def test_openvino_dense_island_rejects_quantized_checkpoint():
+    with pytest.raises(ValueError, match="quantized weights"):
+        OpenVINODenseIsland(
+            torch.ones(4, 8), max_batch_tokens=4, quant_config=object()
+        )
+
+
+@pytest.mark.skipif(
+    not hasattr(torch, "float8_e4m3fn"), reason="PyTorch float8 weights unavailable"
+)
+def test_openvino_dense_island_rejects_raw_fp8_weight_without_scales():
+    weight = torch.empty((4, 8), dtype=torch.float8_e4m3fn)
+
+    with pytest.raises(ValueError, match="float16, bfloat16, or float32"):
+        OpenVINODenseIsland(weight, max_batch_tokens=4)
+
+
+def test_engine_openvino_island_rejects_quantized_checkpoint(monkeypatch):
+    from freetoken.engine.engine import Engine
+    from freetoken.models.llama import model as llama_model
+
+    class _FakeLlamaForCausalLM:
+        pass
+
+    monkeypatch.setattr(llama_model, "LlamaForCausalLM", _FakeLlamaForCausalLM)
+    engine = Engine.__new__(Engine)
+    engine.model = _FakeLlamaForCausalLM()
+    config = SimpleNamespace(
+        openvino_island="llama.layer0.qkv",
+        model_config=SimpleNamespace(quant=object()),
+    )
+
+    with pytest.raises(ValueError, match="unquantized dense weights"):
+        engine._configure_openvino_island(config)
 
 
 def test_openvino_island_rejects_out_of_bucket_input():

@@ -582,6 +582,12 @@ class Engine:
 
         if not isinstance(self.model, LlamaForCausalLM):
             raise ValueError("the llama.layer0.qkv island requires a Llama model")
+        model_config = config.model_config
+        if model_config.quant is not None:
+            raise ValueError(
+                "the llama.layer0.qkv island requires unquantized dense weights; "
+                "quantized projection scales are unsupported"
+            )
         attention = self.model.model.layers.op_list[0].self_attn
         qkv_proj = attention.qkv_proj
         weight = getattr(qkv_proj, "weight", None)
@@ -597,6 +603,7 @@ class Engine:
             bias=qkv_proj.bias,
             max_batch_tokens=config.openvino_island_max_tokens,
             fallback=config.openvino_island_fallback,
+            quant_config=model_config.quant,
         )
         attention.configure_openvino_qkv_island(island)
         if island.execution_info is None:
