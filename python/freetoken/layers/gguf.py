@@ -43,6 +43,10 @@ _MMVQ_SAFE = 6
 
 def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
     """y = x @ dequant(qweight).T, dispatched by batch size and quant type."""
+    if x.device.type == "xpu" and qweight_type == GGML_Q8_0:
+        from freetoken.kernel.sycl.causal_conv1d import q8_0_matvec_sycl
+
+        return q8_0_matvec_sycl(x, qweight)
     if x.device.type != "cuda":
         from freetoken.models.gguf.dequant import dequantize
 
