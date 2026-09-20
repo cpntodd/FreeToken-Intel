@@ -39,6 +39,74 @@ pin from overriding that selection. CUDA users install `freetoken[cuda]` (or the
 existing full-path alias `freetoken[accel]`); these profiles must not be combined in one
 environment.
 
+## Verify the installed XPU wheel
+
+To check packaging independently of editable/source-tree imports, build against the
+active XPU environment and install the wheel into a temporary target without resolving
+or replacing its Torch stack:
+
+```bash
+FT_XPU_WHEEL_TMP=$(mktemp -d /tmp/freetoken-xpu-wheel.XXXXXX)
+FT_REPO_ROOT=$PWD
+FREETOKEN_ACCELERATOR=xpu \
+ONEAPI_ROOT=/opt/intel/oneapi \
+FREETOKEN_SYCL_COMPILER_VERSION=2025.3 \
+CXX=/opt/intel/oneapi/compiler/2025.3/bin/icpx \
+  "$FT_REPO_ROOT/.venv/bin/python" setup.py \
+  build --build-base "$FT_XPU_WHEEL_TMP/build" \
+  bdist_wheel \
+  --dist-dir "$FT_XPU_WHEEL_TMP/wheel" \
+  --bdist-dir "$FT_XPU_WHEEL_TMP/bdist"
+uv pip install --target "$FT_XPU_WHEEL_TMP/install" --no-deps \
+  "$FT_XPU_WHEEL_TMP"/wheel/freetoken-*.whl
+```
+
+Run the smoke from outside the checkout. It checks that both Python and the compiled
+extension came from the installed wheel, reports the selected device, and compares a
+native batched Q4_0 SYCL result with the dequantized reference:
+
+```bash
+(
+  cd /tmp
+  FT_XPU_WHEEL_ROOT="$FT_XPU_WHEEL_TMP/install" \
+  PYTHONPATH="$FT_XPU_WHEEL_TMP/install" FREETOKEN_ACCELERATOR=xpu \
+    "$FT_REPO_ROOT/.venv/bin/python" - <<'PY'
+import os
+import torch
+import freetoken
+from freetoken.accelerator.runtime import resolve_runtime
+from freetoken.kernel import _sycl_kernels
+from freetoken.layers.gguf import fused_mul_mat_gguf
+from freetoken.models.gguf.dequant import GGML_Q4_0, dequantize
+
+wheel = os.environ["FT_XPU_WHEEL_ROOT"] + "/"
+assert freetoken.__file__.startswith(wheel), freetoken.__file__
+assert _sycl_kernels.__file__.startswith(wheel), _sycl_kernels.__file__
+runtime = resolve_runtime("xpu")
+caps = runtime.capabilities(0)
+generator = torch.Generator().manual_seed(89)
+qweight = torch.randint(0, 256, (11, 54), dtype=torch.uint8, generator=generator)
+qweight.view(11, 3, 18)[:, :, :2] = torch.tensor([0.5], dtype=torch.float16).view(torch.uint8)
+x = torch.randn(4, 96, generator=generator)
+weight = dequantize(qweight, GGML_Q4_0, torch.float32).reshape(11, 96)
+expected = x.float() @ weight.T
+actual = fused_mul_mat_gguf(x.to("xpu"), qweight.to("xpu"), GGML_Q4_0)
+runtime.synchronize()
+torch.testing.assert_close(actual.cpu().float(), expected, rtol=5e-5, atol=5e-5)
+print(caps)
+print("Q4_0 output:", tuple(actual.shape), "max abs error:",
+      (actual.cpu().float() - expected).abs().max().item())
+PY
+)
+```
+
+On 2026-09-21, this check passed on the host Arc B580 (`0xE20B`, driver
+`1.6.33578+15`) with `torch==2.12.1+xpu` and oneAPI DPC++ 2025.3.3. Both package
+imports resolved from the temporary installation, and the `[4, 96]` by Q4_0 operation
+returned shape `[4, 11]` with maximum absolute error `7.63e-6`. `nvtop -s` identified
+Battlemage G21 / Arc B580 and reported 4% memory use after the operation; its utilization
+field was unavailable in that idle snapshot.
+
 Run the hardware benchmark with a supported local GGUF:
 
 ```bash
