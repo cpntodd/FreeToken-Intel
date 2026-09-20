@@ -217,6 +217,29 @@ oneAPI/Level Zero. A zero-copy bridge therefore belongs in a C++ extension that 
 validate native context compatibility, retain the PyTorch allocation, and synchronize
 both queues. Passing an integer device address through Python is not a supported path.
 
+`experiments/probe_openvino_usm.py` is an isolated C++/Python probe for that boundary.
+It compiles a GPU-only OpenVINO multiply model, tries to wrap a live PyTorch XPU tensor
+with the GPU plugin's `USM_USER_BUFFER` RemoteTensor, checks pointer identity, and
+compares the result. It synchronizes PyTorch around inference, so it tests serialized
+sharing only, not asynchronous queue interoperability. On the host B580 with PyTorch
+2.12.1+xpu and OpenVINO 2026.4.0, PyTorch reports Level-Zero V2 and OpenVINO identifies
+the same Arc B580 but exposes an OCL context. RemoteTensor creation rejects the
+PyTorch allocation with `shared USM buffer has smaller size (0) than specified layout
+(64)` before inference; pointer identity and output parity are therefore unproven. This
+confirms that the documented OpenVINO USM-pointer API does not by itself make this
+Level-Zero allocation importable into the current OCL context. Keep the host-staged
+path until a compatible context or explicit export/import mechanism is proven.
+
+Run the probe with:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
+  .venv/bin/python experiments/probe_openvino_usm.py
+```
+
+Exit code 2 with a JSON diagnostic means the current runtime pair rejected the pointer;
+it is not a CPU fallback or a failed OpenVINO GPU compilation.
+
 ## Vulkan prototype
 
 `experiments/vulkan` contains a deliberately isolated Vulkan compute prototype. It
