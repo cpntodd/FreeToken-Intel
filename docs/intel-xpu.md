@@ -177,6 +177,17 @@ agreement than the Qwen Q2_K run, but the model architecture and quantization bo
 differ, so it only narrows the discrepancy to the Qwen/checkpoint path; it does not
 identify Q2_K or prove full-logit parity.
 
+A same-family quantized-checkpoint control used
+`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` with the same 59 prompt token IDs. FreeToken
+XPU and Prism Vulkan0 on the B580 both selected token ID 1596 (`We`); 19/20 top-token
+IDs overlapped, with mean and maximum shared-token absolute log-probability
+differences of 0.124 and 0.299. `nvtop` showed 99% B580 memory use for FreeToken and
+83% while Prism was loaded. Prism logged a memory-fit warning with the explicit
+`-ngl 99` setting and ignored the checkpoint's extra MTP block, so this is exploratory
+first-token evidence, not proof of full Vulkan offload or MTP parity. The closer
+scores than the Qwen Q2_K run are consistent with quantization or checkpoint
+differences contributing, but do not isolate either cause.
+
 The same public XPU path completed a forced-length smoke for the local
 `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` checkpoint on this B580. Its earlier 61-token
 sample (48.85 s load, 1.53 prompt tokens/s, and 0.794 decode tokens/s) used the
