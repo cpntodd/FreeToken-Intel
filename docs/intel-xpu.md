@@ -638,6 +638,36 @@ and max absolute error was `8.34e-7`. The host smoke test also passed its explic
 device-ID (`0xE20B`) and parity assertions. This is a single synthetic-operation check,
 not persistent model-weight or serving evidence.
 
+`bench_llama_qkv_island.py` adds an opt-in real-operation experiment. It loads a local
+Llama GGUF on XPU, captures eight rows at `LlamaAttention._project_qkv` layer 0, rounds
+the activation and loaded dense QKV weight from BF16 to FP16, and feeds those exact
+operands to the standalone Vulkan probe. It records the native BF16 output and an XPU
+FP32 reference using the same FP16 operands. The Vulkan result is compared against that
+reference to isolate kernel math; its separate comparison against native BF16 also
+includes the BF16-to-FP16 operand conversion. Raw tensors and a manifest are kept in a
+new temporary directory under `/tmp`.
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
+  .venv/bin/python experiments/vulkan/bench_llama_qkv_island.py \
+  /home/oddsoul/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --rows 8 --context 64 --kv-tokens 64 --iterations 5
+```
+
+On 2026-09-21 this captured an `8x2048` activation and a `3072x2048` layer-0 QKV
+weight on the Arc B580 (`0xE20B`, driver `1.6.33578+15`); Vulkan selected the same B580
+and its `8x16x16` cooperative FP16/FP32 path. Against XPU FP32 on identical FP16
+operands, maximum absolute error was `2.52e-4` and relative L2 error was `1.01e-5`.
+Casting the Vulkan result back to BF16 differed from the native BF16 QKV output by
+`0.015625` maximum absolute error (`1.66e-4` relative L2); this includes operand
+conversion and is not an isolated backend error. Five warmed dispatches measured
+0.622 ms median dispatch and 0.628 ms median upload-plus-dispatch; the static weight
+upload took 4.94 ms. One mapped-output invalidation/readback measured 47.74 ms, so the
+kernel timing is not an end-to-end latency claim. Compilation and the complete probe
+invocation took 3.53 s. This validates one loaded operation on one checkpoint, not
+serving, persistent model-weight ownership, PyTorch/Vulkan memory sharing, broad model
+quality, or steady-state performance.
+
 Run this odd-dimension validation-layer smoke:
 
 ```bash

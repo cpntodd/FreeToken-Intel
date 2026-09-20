@@ -278,6 +278,42 @@ static float half_to_float(uint16_t value) {
   return std::bit_cast<float>(bits);
 }
 
+static std::vector<uint16_t> read_half_values(const char *path,
+                                              size_t expected_count) {
+  std::ifstream stream(path, std::ios::binary | std::ios::ate);
+  if (!stream)
+    throw std::runtime_error(std::string("cannot open FP16 tensor: ") + path);
+  const auto byte_count = stream.tellg();
+  const size_t expected_bytes = expected_count * sizeof(uint16_t);
+  if (byte_count < 0 || static_cast<uint64_t>(byte_count) != expected_bytes)
+    throw std::runtime_error(std::string("FP16 tensor has an invalid size: ") +
+                             path);
+  std::vector<uint16_t> values(expected_count);
+  stream.seekg(0);
+  stream.read(reinterpret_cast<char *>(values.data()),
+              static_cast<std::streamsize>(expected_bytes));
+  if (!stream)
+    throw std::runtime_error(std::string("cannot read FP16 tensor: ") + path);
+  return values;
+}
+
+static double write_float_values(const char *path,
+                                const std::vector<float> &values) {
+  auto started = std::chrono::steady_clock::now();
+  std::ofstream stream(path, std::ios::binary | std::ios::trunc);
+  if (!stream)
+    throw std::runtime_error(std::string("cannot create FP32 output: ") + path);
+  stream.write(reinterpret_cast<const char *>(values.data()),
+               static_cast<std::streamsize>(values.size() * sizeof(float)));
+  if (!stream)
+    throw std::runtime_error(std::string("cannot write FP32 output: ") + path);
+  stream.close();
+  if (stream.fail())
+    throw std::runtime_error(std::string("cannot close FP32 output: ") + path);
+  auto ended = std::chrono::steady_clock::now();
+  return std::chrono::duration<double, std::milli>(ended - started).count();
+}
+
 static double median(std::vector<double> samples) {
   std::sort(samples.begin(), samples.end());
   const size_t middle = samples.size() / 2;
@@ -296,12 +332,17 @@ static uint32_t parse_dimension(const char *value) {
 }
 
 int main(int argc, char **argv) try {
-  if (argc != 5 && argc != 9) {
+  const auto probe_started = std::chrono::steady_clock::now();
+  const bool raw_tensor_mode = argc == 12;
+  if (argc != 5 && argc != 9 && !raw_tensor_mode) {
     std::cerr << "usage: vulkan_dense_probe [naive|tiled|cooperative|best] "
                  "NAIVE_SPV TILED_SPV COOPERATIVE_SPV "
-                 "[ROWS INPUT_SIZE OUTPUT_SIZE ITERATIONS]\n";
+                 "[ROWS INPUT_SIZE OUTPUT_SIZE ITERATIONS "
+                 "[INPUT_F16 WEIGHT_F16 OUTPUT_F32]]\n";
     return 2;
   }
+  if (raw_tensor_mode && std::endian::native != std::endian::little)
+    throw std::runtime_error("raw tensor mode requires a little-endian host");
   const std::string requested_kernel = argv[1];
   if (requested_kernel != "naive" && requested_kernel != "tiled" &&
       requested_kernel != "cooperative" && requested_kernel != "best")
@@ -309,7 +350,7 @@ int main(int argc, char **argv) try {
         "kernel must be naive, tiled, cooperative, or best");
   Dimensions dims{8, 256, 512};
   uint32_t iterations = 20;
-  if (argc == 9) {
+  if (argc >= 9) {
     dims.rows = parse_dimension(argv[5]);
     dims.input_size = parse_dimension(argv[6]);
     dims.output_size = parse_dimension(argv[7]);
@@ -424,6 +465,7 @@ int main(int argc, char **argv) try {
                             : kernel == "cooperative" ? argv[4]
                                                       : argv[3];
 
+  const auto device_init_started = std::chrono::steady_clock::now();
   float priority = 1.0f;
   VkDeviceQueueCreateInfo queue_create{
       VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
@@ -455,13 +497,33 @@ int main(int argc, char **argv) try {
   VK_CHECK(vkCreateDevice(physical, &device_create, nullptr, &device));
   VkQueue queue{};
   vkGetDeviceQueue(device, queue_family, 0, &queue);
+  const auto device_init_ended = std::chrono::steady_clock::now();
+  const double device_init_ms =
+      std::chrono::duration<double, std::milli>(device_init_ended -
+                                                device_init_started)
+          .count();
 
   std::vector<float> input(dims.rows * dims.input_size);
   std::vector<float> weight(dims.output_size * dims.input_size);
-  for (size_t i = 0; i < input.size(); ++i)
-    input[i] = static_cast<float>(static_cast<int>(i % 17) - 8) / 17.0f;
-  for (size_t i = 0; i < weight.size(); ++i)
-    weight[i] = static_cast<float>(static_cast<int>(i % 13) - 6) / 13.0f;
+  if (raw_tensor_mode) {
+    const auto raw_input = read_half_values(argv[9], input.size());
+    const auto raw_weight = read_half_values(argv[10], weight.size());
+    for (size_t i = 0; i < input.size(); ++i) {
+      input[i] = half_to_float(raw_input[i]);
+      if (!std::isfinite(input[i]))
+        throw std::runtime_error("activation contains a non-finite FP16 value");
+    }
+    for (size_t i = 0; i < weight.size(); ++i) {
+      weight[i] = half_to_float(raw_weight[i]);
+      if (!std::isfinite(weight[i]))
+        throw std::runtime_error("weight contains a non-finite FP16 value");
+    }
+  } else {
+    for (size_t i = 0; i < input.size(); ++i)
+      input[i] = static_cast<float>(static_cast<int>(i % 17) - 8) / 17.0f;
+    for (size_t i = 0; i < weight.size(); ++i)
+      weight[i] = static_cast<float>(static_cast<int>(i % 13) - 6) / 13.0f;
+  }
   const auto round_up = [](uint32_t value, uint32_t multiple) {
     return ((value + multiple - 1) / multiple) * multiple;
   };
@@ -501,6 +563,7 @@ int main(int argc, char **argv) try {
             weight[static_cast<size_t>(output) * dims.input_size + k];
   }
   std::vector<float> expected(dims.rows * dims.output_size, 0.0f);
+  const auto reference_started = std::chrono::steady_clock::now();
   for (uint32_t row = 0; row < dims.rows; ++row)
     for (uint32_t column = 0; column < dims.output_size; ++column)
       for (uint32_t k = 0; k < dims.input_size; ++k)
@@ -515,6 +578,14 @@ int main(int argc, char **argv) try {
                        half_weight[static_cast<size_t>(k) * padded_output_size +
                                    column])
                  : weight[static_cast<size_t>(column) * dims.input_size + k]);
+  const auto reference_ended = std::chrono::steady_clock::now();
+  const double cpu_reference_ms =
+      std::chrono::duration<double, std::milli>(reference_ended -
+                                                reference_started)
+          .count();
+  if (!std::all_of(expected.begin(), expected.end(),
+                   [](float value) { return std::isfinite(value); }))
+    throw std::runtime_error("CPU reference contains a non-finite value");
 
   const size_t input_bytes = kernel == "cooperative"
                                  ? half_input.size() * sizeof(uint16_t)
@@ -526,6 +597,7 @@ int main(int argc, char **argv) try {
                                   ? static_cast<size_t>(padded_rows) *
                                         padded_output_size * sizeof(float)
                                   : expected.size() * sizeof(float);
+  const auto vulkan_setup_started = std::chrono::steady_clock::now();
   Buffer input_buffer = make_buffer(device, physical, input_bytes);
   Buffer weight_buffer = make_buffer(device, physical, weight_bytes);
   Buffer output_buffer = make_buffer(device, physical, output_bytes);
@@ -664,6 +736,11 @@ int main(int argc, char **argv) try {
                   1);
   }
   VK_CHECK(vkEndCommandBuffer(command));
+  const auto vulkan_setup_ended = std::chrono::steady_clock::now();
+  const double vulkan_setup_ms =
+      std::chrono::duration<double, std::milli>(vulkan_setup_ended -
+                                                vulkan_setup_started)
+          .count();
 
   VkSubmitInfo submit{VK_STRUCTURE_TYPE_SUBMIT_INFO};
   submit.commandBufferCount = 1;
@@ -692,8 +769,10 @@ int main(int argc, char **argv) try {
                                    .count());
   }
 
+  const auto readback_started = std::chrono::steady_clock::now();
   invalidate_if_needed(device, output_buffer);
   auto *output = static_cast<const float *>(output_buffer.mapped);
+  std::vector<float> result(expected.size());
   float max_error = 0.0f;
   for (uint32_t row = 0; row < dims.rows; ++row)
     for (uint32_t column = 0; column < dims.output_size; ++column) {
@@ -703,9 +782,21 @@ int main(int argc, char **argv) try {
           kernel == "cooperative"
               ? static_cast<size_t>(row) * padded_output_size + column
               : expected_index;
-      max_error = std::max(
-          max_error, std::abs(output[output_index] - expected[expected_index]));
+      result[expected_index] = output[output_index];
+      if (!std::isfinite(result[expected_index]))
+        throw std::runtime_error("Vulkan output contains a non-finite value");
+      max_error = std::max(max_error,
+                           std::abs(result[expected_index] - expected[expected_index]));
     }
+  const auto readback_ended = std::chrono::steady_clock::now();
+  const double output_readback_ms =
+      std::chrono::duration<double, std::milli>(readback_ended - readback_started)
+          .count();
+  const double output_file_write_ms =
+      raw_tensor_mode ? write_float_values(argv[11], result) : 0.0;
+  const double probe_elapsed_ms =
+      std::chrono::duration<double, std::milli>(readback_ended - probe_started)
+          .count();
 
   std::cout
       << "{\n"
@@ -717,6 +808,8 @@ int main(int argc, char **argv) try {
           : kernel == "tiled" ? "transposed_gemv_fp32"
                               : "cooperative_fp16_fp32_acc")
       << "\",\n"
+      << "  \"raw_tensor_mode\": " << (raw_tensor_mode ? "true" : "false")
+      << ",\n"
       << "  \"weight_layout\": \"" << weight_layout << "\",\n"
       << "  \"buffer_memory_type_index\": " << input_buffer.memory_type_index
       << ",\n"
@@ -753,12 +846,19 @@ int main(int argc, char **argv) try {
             << "  \"input_size\": " << dims.input_size << ",\n"
             << "  \"output_size\": " << dims.output_size << ",\n"
             << "  \"iterations\": " << iterations << ",\n"
+            << "  \"device_init_ms\": " << device_init_ms << ",\n"
+            << "  \"vulkan_setup_ms\": " << vulkan_setup_ms << ",\n"
+            << "  \"cpu_reference_ms\": " << cpu_reference_ms << ",\n"
             << "  \"weight_upload_ms\": " << weight_upload_ms << ",\n"
             << "  \"median_input_upload_ms\": " << median(input_upload_samples)
             << ",\n"
             << "  \"median_dispatch_ms\": " << median(dispatch_samples) << ",\n"
             << "  \"median_upload_plus_dispatch_ms\": "
             << median(upload_dispatch_samples) << ",\n"
+            << "  \"output_readback_ms\": " << output_readback_ms << ",\n"
+            << "  \"output_file_write_ms\": " << output_file_write_ms << ",\n"
+            << "  \"probe_elapsed_before_output_file_write_ms\": "
+            << probe_elapsed_ms << ",\n"
             << "  \"max_abs_error\": " << max_error << "\n"
             << "}\n";
 

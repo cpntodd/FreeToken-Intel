@@ -16,7 +16,7 @@ a safe memory/synchronization boundary.
 | --- | --- | --- | --- |
 | PyTorch XPU + SYCL | Primary in-process Intel engine; PyTorch owns tensors, model, scheduler and caches, with SYCL kernels for selected operations | `--accelerator xpu` | Serving and B580 model paths already have evidence; expand kernel and hardware coverage |
 | OpenVINO | Opt-in GPU compute island for a selected bounded dense operation | `--openvino-island llama.layer0.qkv`; fallback is `none` or explicitly `xpu` | Llama layer-0 QKV serving call site is integrated and ran on B580; host staging benchmark is slower than eager XPU |
-| Vulkan | Isolated shader/backend research | No serving option yet | Synthetic B580 matrix probe only; no model execution or PyTorch memory sharing |
+| Vulkan | Isolated shader/backend research | No serving option yet | One captured Llama layer-0 QKV operation ran on B580; no serving path or PyTorch memory sharing |
 
 ## Why the OpenVINO island remains bounded and opt-in
 
@@ -33,8 +33,10 @@ projection for the GPU but copies FP16 activations from XPU to host and copies r
 back. A repeated 32-token B580 run at 5120 -> 10240 measured 1.98 ms for the complete
 island versus 0.331 ms for eager XPU (5.99x slower), with maximum absolute error
 0.0078125. It is a measurement/prototyping seam, not a serving optimization. Vulkan's
-cooperative-matrix results are also isolated kernel measurements, and the current Vulkan
-buffers are not shared with PyTorch XPU.
+cooperative-matrix path has also run once against a captured Llama layer-0 QKV activation
+and loaded dense weight. That standalone probe still uses Vulkan-owned mapped buffers,
+not shared PyTorch XPU allocations, and its single operation sample is not an end-to-end
+performance result.
 
 The repository's existing execution shape is consequently the preferred native Arc
 path: retain the current engine and scheduler, keep XPU as the tensor/runtime owner, and
@@ -160,10 +162,10 @@ Vulkan should remain a research backend, not a third path in the production sche
 `VK_KHR_cooperative_matrix` requires runtime feature/property discovery, and the Vulkan
 specification explicitly makes supported matrix sizes/types implementation-dependent.
 The B580's reported 8x16x16 tile is device evidence, not a portable Arc guarantee. Before
-serving integration, Vulkan needs persistent weight/pipeline ownership, representative
-model operations (not only dense GEMM), batching and cancellation semantics, explicit
-cross-API memory lifetime/synchronization, and end-to-end measurements including packing,
-copies, and handoff back to the engine.
+serving integration, Vulkan needs persistent weight/pipeline ownership, broader
+model-operation coverage beyond one dense QKV sample, batching and cancellation semantics,
+explicit cross-API memory lifetime/synchronization, and end-to-end measurements including
+packing, copies, and handoff back to the engine.
 
 ## Historical acceptance sequence for the whole-model alternative
 
