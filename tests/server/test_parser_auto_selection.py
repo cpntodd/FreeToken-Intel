@@ -31,6 +31,7 @@ ANON_PATH = "/models/anon"
 # parser, and a new architecture landing here is the bug this file exists to catch.
 NO_REASONING_FORMAT = {
     "LlamaForCausalLM",
+    "LlamaGGUFForCausalLM",
     "MistralForCausalLM",
     "Mistral3ForConditionalGeneration",
     "Qwen2ForCausalLM",
@@ -38,7 +39,7 @@ NO_REASONING_FORMAT = {
 
 # `llama3` is the end of the cascade -- the answer when nothing matched.
 GENERIC_TOOL_CALL_FALLBACK = "llama3"
-NO_DEDICATED_TOOL_FORMAT = {"LlamaForCausalLM"}
+NO_DEDICATED_TOOL_FORMAT = {"LlamaForCausalLM", "LlamaGGUFForCausalLM"}
 
 
 class _Config:
