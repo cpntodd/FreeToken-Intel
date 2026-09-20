@@ -44,6 +44,14 @@ PYTHONPATH=python \
   /home/oddsoul/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
 ```
 
+On 2026-09-20, the host Arc B580 completed a short public `LLM` API smoke test with
+`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf`. The runtime identified PCI device `0xE20B`,
+driver `1.6.33578+15`, and Intel oneAPI Unified Runtime over Level-Zero V2. A 20-token
+prompt ran at 2.71 tokens/s and produced token ID 9259 (`Hello`); model load took
+41.57 s, and generation took 7.43 s including prefill. This confirms end-to-end
+execution on the intended GPU, but the one-token result is only a functional smoke
+test, not a performance baseline.
+
 The same benchmark also covers Llama 3 GGUF checkpoints. The validated
 `Llama-3.2-1B-Instruct-Q4_K_M.gguf` path reconstructs the checkpoint's Llama 3 RoPE
 scaling, reverses the GGUF q/k RoPE permutation, and dequantizes mixed Q4_K/Q6_K
