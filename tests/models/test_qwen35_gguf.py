@@ -1,5 +1,6 @@
 import torch
 from freetoken.models.gguf.config import GgufConfigShim
+from freetoken.models.qwen3_5_moe.gdn import Qwen3_5GatedDeltaNet
 from freetoken.models.qwen3_5_moe.gguf import parse_gguf_config
 
 
@@ -89,3 +90,15 @@ def test_mixed_gguf_linear_keeps_each_projection_in_its_own_quant_format():
 
     torch.testing.assert_close(actual, expected)
     assert set(layer.state_dict()) == {"parts.0.qweight", "parts.1.qweight"}
+
+
+def test_qwen35_gguf_v_head_layout_round_trip():
+    op = object.__new__(Qwen3_5GatedDeltaNet)
+    op.num_k_heads = 2
+    op.num_v_heads = 6
+    grouped = torch.arange(2 * 6 * 4).reshape(2, 6, 4)
+
+    tiled = op._v_grouped_to_tiled(grouped)
+
+    torch.testing.assert_close(tiled[:, :, 0], grouped[:, [0, 3, 1, 4, 2, 5], 0])
+    torch.testing.assert_close(op._v_tiled_to_grouped(tiled), grouped)

@@ -21,7 +21,8 @@ MAX_ROWS_PER_BLOCK = 4
 
 @contextlib.contextmanager
 def _device_context(device: torch.device):
-    with torch.cuda.device(device):
+    manager = torch.xpu.device(device) if device.type == "xpu" else torch.cuda.device(device)
+    with manager:
         yield
 
 
@@ -132,7 +133,9 @@ def _layer_norm_fwd_1pass_kernel(
 
 @lru_cache
 def _get_sm_count(device: torch.device) -> int:
-    """Get and cache the SM count for a given device."""
+    """Get and cache the accelerator's independently scheduled compute-unit count."""
+    if device.type == "xpu":
+        return torch.xpu.get_device_properties(device).max_compute_units
     props = torch.cuda.get_device_properties(device)
     return props.multi_processor_count
 
@@ -247,7 +250,7 @@ def rms_norm_gated(
     weight = weight.contiguous()
     if bias is not None:
         bias = bias.contiguous()
-    y, mean, rstd = _layer_norm_fwd(
+    y, _mean, _rstd = _layer_norm_fwd(
         x,
         weight,
         bias,

@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 import torch
+
 from freetoken.core import get_global_ctx
 from freetoken.layers import (
     BaseOP,
@@ -11,8 +12,7 @@ from freetoken.layers import (
     ParallelLMHead,
     VocabParallelEmbedding,
 )
-from freetoken.models.blocks import BaseLLMModel
-from freetoken.models.blocks import embed_input_ids
+from freetoken.models.blocks import BaseLLMModel, embed_input_ids
 from freetoken.models.qwen3_vl.vision import Qwen3VLVisionModel, QwenVLVisionMixin
 from freetoken.utils import nvtx_annotate
 
@@ -108,6 +108,10 @@ class Qwen3_5ForCausalLM(BaseLLMModel):
             quant_config=config.quant,
             prefix="lm_head",
         )
+        from .gguf import convert_qwen35_to_gguf, is_gguf_model
+
+        if is_gguf_model(config):
+            convert_qwen35_to_gguf(self, config)
         super().__init__()
 
     def forward(self) -> torch.Tensor:

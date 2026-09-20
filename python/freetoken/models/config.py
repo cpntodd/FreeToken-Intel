@@ -318,6 +318,9 @@ class ModelConfig:
     # means this is not a direct-GGUF model.
     gguf_weight_type: int | None = None
     gguf_embedding_type: int | None = None
+    # Per-source tensor GGML types for mixed-quant GGUF models. Unlike the two
+    # homogeneous fields above, this preserves the format of every packed projection.
+    gguf_tensor_types: dict[str, int] | None = None
     swiglu_limit: float | None = None
     hidden_act_alpha: float = 1.702
     # Full DeepseekV4Args payload for the DSV4-specific machinery (MLA sparse attention,

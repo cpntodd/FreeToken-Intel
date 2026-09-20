@@ -2,9 +2,15 @@ from __future__ import annotations
 
 import torch
 import torch.nn.functional as F
+
 from freetoken.core import get_global_ctx
 from freetoken.kernel.causal_conv1d import causal_conv1d_decode, causal_conv1d_varlen
-from freetoken.layers import BaseOP, GatedRMSNorm, LinearColParallelMerged, LinearReplicated
+from freetoken.layers import (
+    BaseOP,
+    GatedRMSNorm,
+    LinearColParallelMerged,
+    LinearReplicated,
+)
 from freetoken.layers.quantization import QuantConfig
 
 from .gdn_kernels import gdn_decode_fla, gdn_prefill_chunk_fla
@@ -48,6 +54,7 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         self.value_dim = num_v_heads * head_v_dim
         self.conv_dim = 2 * self.key_dim + self.value_dim
         self.conv_kernel_size = conv_kernel_size
+        self.gguf_tiled_v = False
         # quantized checkpoints quantize qkv|z but not b|a, so the fusion splits into a qkvz GEMM and a ba GEMM with their own schemes (matches sglang / vLLM)
         self._split_in_proj = (
             quant_config is not None and quant_config.scheme_for(f"{prefix}.in_proj_qkvz") is not None
@@ -89,6 +96,20 @@ class Qwen3_5GatedDeltaNet(BaseOP):
 
     def _conv_weight(self) -> torch.Tensor:
         return self.conv1d.weight.squeeze(1)  # [conv_dim, kernel] for the fused kernel
+
+    def _v_tiled_to_grouped(self, tensor: torch.Tensor) -> torch.Tensor:
+        ratio = self.num_v_heads // self.num_k_heads
+        shape = tensor.shape
+        return tensor.reshape(*shape[:-2], ratio, self.num_k_heads, shape[-1]).transpose(
+            -3, -2
+        ).contiguous().reshape(shape)
+
+    def _v_grouped_to_tiled(self, tensor: torch.Tensor) -> torch.Tensor:
+        ratio = self.num_v_heads // self.num_k_heads
+        shape = tensor.shape
+        return tensor.reshape(*shape[:-2], self.num_k_heads, ratio, shape[-1]).transpose(
+            -3, -2
+        ).contiguous().reshape(shape)
 
     def _conv_prefill(self, conv_in, pool, cu_seqlens, cache_indices, has_initial_state) -> torch.Tensor:
         """Varlen causal conv (fused sgl_kernel) with silu; reads/updates each request's
@@ -147,6 +168,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             proj = self.in_proj.forward(hidden_states)
             conv_in, z, b, a = torch.split(proj, self._in_proj_split, dim=-1)
         z = z.reshape(total, self.num_v_heads, self.head_v_dim)
+        if self.gguf_tiled_v:
+            z = self._v_tiled_to_grouped(z)
+            b = self._v_tiled_to_grouped(b.reshape(total, self.num_v_heads, 1)).squeeze(-1)
+            a = self._v_tiled_to_grouped(a.reshape(total, self.num_v_heads, 1)).squeeze(-1)
         li = pool.local_index(self.layer_id)
 
         if batch.is_decode:
@@ -159,6 +184,8 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             q = qf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
             k = kf.reshape(1, B, self.num_k_heads, self.head_k_dim).to(dtype)
             v = vf.reshape(1, B, self.num_v_heads, self.head_v_dim).to(dtype)
+            if self.gguf_tiled_v:
+                v = self._v_tiled_to_grouped(v)
             core_out = gdn_decode_fla(
                 q, k, v, a, b, A_log=self.A_log, dt_bias=self.dt_bias,
                 state_source=pool.recurrent_states[li], indices=fla.cache_indices,
@@ -172,6 +199,8 @@ class Qwen3_5GatedDeltaNet(BaseOP):
             q = qf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
             k = kf.reshape(1, total, self.num_k_heads, self.head_k_dim).to(dtype)
             v = vf.reshape(1, total, self.num_v_heads, self.head_v_dim).to(dtype)
+            if self.gguf_tiled_v:
+                v = self._v_tiled_to_grouped(v)
             g, beta = self._gate_params(a, b)
             g = g.reshape(1, total, self.num_v_heads)
             beta = beta.float().reshape(1, total, self.num_v_heads)
@@ -195,6 +224,10 @@ class Qwen3_5GatedDeltaNet(BaseOP):
         core_out = core_out.reshape(-1, self.head_v_dim)
         z = z.reshape(-1, self.head_v_dim)
         out = self.norm.forward(core_out, z).reshape(total, -1)
+        if self.gguf_tiled_v:
+            out = self._v_grouped_to_tiled(
+                out.reshape(total, self.num_v_heads, self.head_v_dim)
+            ).reshape(total, -1)
         return self.out_proj.forward(out)
 
 

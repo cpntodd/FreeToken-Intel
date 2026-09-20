@@ -13,7 +13,7 @@ from typing import Any
 from .reader import gguf_architecture, load_gguf_metadata
 
 # GGUF architecture -> transformers GGUF tokenizer-converter key.
-_TOKENIZER_ARCH = {"gemma4": "gemma4_text"}
+_TOKENIZER_ARCH = {"gemma4": "gemma4_text", "qwen35": "qwen2"}
 
 
 def load_gguf_tokenizer(model_path: str):
@@ -72,4 +72,4 @@ def gguf_eos_token_ids(model_path: str, tokenizer) -> set[int]:
     return ids
 
 
-__all__ = ["load_gguf_tokenizer", "gguf_eos_token_ids"]
+__all__ = ["gguf_eos_token_ids", "load_gguf_tokenizer"]

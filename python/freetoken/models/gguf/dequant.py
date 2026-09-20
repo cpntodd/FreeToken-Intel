@@ -527,6 +527,13 @@ def dequant_iq1_m(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     return (scale[..., None, None] * (grid + delta)).reshape(-1).to(out_dtype)
 
 
+def dequant_q8_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    blocks = raw.reshape(-1, 34)
+    scale = blocks[:, :2].contiguous().view(torch.float16).to(torch.float32).reshape(-1, 1)
+    quants = blocks[:, 2:].contiguous().view(torch.int8).to(torch.float32)
+    return (quants * scale).reshape(-1).to(out_dtype)
+
+
 _DEQUANT = {
     GGML_IQ1_M: dequant_iq1_m,
     GGML_IQ1_S: dequant_iq1_s,
@@ -542,6 +549,7 @@ _DEQUANT = {
     GGML_Q4_K: dequant_q4_k,
     GGML_Q5_K: dequant_q5_k,
     GGML_Q6_K: dequant_q6_k,
+    GGML_Q8_0: dequant_q8_0,
 }
 
 

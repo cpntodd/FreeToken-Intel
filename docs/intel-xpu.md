@@ -52,6 +52,16 @@ generated `Hello!` for the default chat prompt. This is a correctness baseline, 
 the final packed-quantized execution path; the dense BF16 expansion increases device
 memory use and load time.
 
+Dense Qwen3.8 GGUF checkpoints use a memory-feasible native packed path rather than
+expanding the 27B model to BF16. The adapter preserves each source tensor's GGML type,
+supports the checkpoint's mixed K/IQ/Q8 formats, reverses llama.cpp's tiled GDN value-head
+storage at the FreeToken recurrence boundary, and omits the stored MTP layer. The
+`Qwen3.8-27B-UD-Q2_K_XL.gguf` checkpoint loads 9.47 GB of model state on the B580 and
+has completed both a 57-token prefill and multi-token decode through the public `LLM`
+API. This remains a correctness path: packed projections currently use bounded XPU
+dequantization islands and achieve only about 0.04 output token/s. Native SYCL fused
+GGML matrix-vector/matrix kernels are required before calling this production-ready.
+
 For a non-system Level Zero SDK, expose its header and loader paths through `CPATH` and
 `LIBRARY_PATH` before running Intel Triton for the first time. The runtime reports the
 selected device, PCI ID, driver, and Level Zero platform in the benchmark JSON.

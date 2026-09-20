@@ -19,6 +19,7 @@ from .reader import gguf_architecture, gguf_tensor_names, load_gguf_metadata
 GGUF_ARCH_TO_REGISTRY: dict[str, str] = {
     "gemma4": "Gemma4GGUFForCausalLM",
     "llama": "LlamaGGUFForCausalLM",
+    "qwen35": "Qwen3_5GGUFForCausalLM",
 }
 
 

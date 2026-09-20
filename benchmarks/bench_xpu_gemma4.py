@@ -59,6 +59,7 @@ def main() -> None:
                 "model": args.model,
                 "prompt_tokens": len(input_ids),
                 "output_tokens": len(result["token_ids"]),
+                "token_ids": result["token_ids"],
                 "text": result["text"],
                 "load_seconds": load_seconds,
                 "generation_seconds": generation_seconds,

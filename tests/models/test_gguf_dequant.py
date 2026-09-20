@@ -18,6 +18,7 @@ from freetoken.models.gguf.dequant import (
     GGML_Q3_K,
     GGML_Q4_K,
     GGML_Q5_K,
+    GGML_Q8_0,
     dequantize,
     row_bytes,
 )
@@ -49,6 +50,7 @@ def test_q4_k_dequant_matches_gguf_reference():
         (GGML_IQ3_XXS, 98),
         (GGML_IQ3_S, 110),
         (GGML_IQ4_XS, 136),
+        (GGML_Q8_0, 34),
     ],
 )
 def test_additional_k_quant_dequant_matches_gguf_reference(quant_type, block_size):
