@@ -409,9 +409,11 @@ selection, inverse embedding ordering, and the GDN permutation. The complete
 (`xpu:0`, PCI `0xE20B`, driver `1.6.33578+15`, Level Zero V2): a 38.86 s cold load
 produced token IDs `760, 1156, 6587` (`The user wants`) from the benchmark prompt. The
 classic checkpoint produced the same IDs in a separate run. These are short functional
-smokes, not quality or throughput claims; exact logits parity against an independently
-rendered Prism reference prompt remains unverified. Reproduce the transformed-checkpoint
-smoke with:
+smokes, not quality or throughput claims. An exact-template CPU run through the local
+Prism `llama-cli` produced `We need to` rather than `The user wants`; generated token IDs
+and logits were not captured, so this is a parity warning rather than a diagnosed cause.
+The B580 result must not be treated as reference-quality evidence until this discrepancy
+is resolved. Reproduce the transformed-checkpoint smoke with:
 
 ```bash
 FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
