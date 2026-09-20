@@ -150,7 +150,8 @@ static const char *component_type_name(VkComponentTypeKHR type) {
 }
 
 static Buffer make_buffer(VkDevice device, VkPhysicalDevice physical,
-                          VkDeviceSize size) {
+                          VkDeviceSize size,
+                          VkMemoryPropertyFlags preferred_properties) {
   Buffer buffer{.size = size};
   VkBufferCreateInfo create{VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO};
   create.size = size;
@@ -166,9 +167,7 @@ static Buffer make_buffer(VkDevice device, VkPhysicalDevice physical,
   allocation.memoryTypeIndex =
       find_memory_type(physical, requirements.memoryTypeBits,
                        VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT,
-                       VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT |
-                           VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
-                       &memory_properties);
+                       preferred_properties, &memory_properties);
   buffer.memory_type_index = allocation.memoryTypeIndex;
   buffer.memory_properties = memory_properties;
   VK_CHECK(vkAllocateMemory(device, &allocation, nullptr, &buffer.memory));
@@ -598,9 +597,14 @@ int main(int argc, char **argv) try {
                                         padded_output_size * sizeof(float)
                                   : expected.size() * sizeof(float);
   const auto vulkan_setup_started = std::chrono::steady_clock::now();
-  Buffer input_buffer = make_buffer(device, physical, input_bytes);
-  Buffer weight_buffer = make_buffer(device, physical, weight_bytes);
-  Buffer output_buffer = make_buffer(device, physical, output_bytes);
+  const auto device_local_coherent =
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+  Buffer input_buffer =
+      make_buffer(device, physical, input_bytes, device_local_coherent);
+  Buffer weight_buffer =
+      make_buffer(device, physical, weight_bytes, device_local_coherent);
+  Buffer output_buffer =
+      make_buffer(device, physical, output_bytes, VK_MEMORY_PROPERTY_HOST_CACHED_BIT);
   const double weight_upload_ms =
       kernel == "cooperative" ? upload(device, weight_buffer, half_weight)
                               : upload(device, weight_buffer, shader_weight);
@@ -735,6 +739,18 @@ int main(int argc, char **argv) try {
     vkCmdDispatch(command, (dims.output_size + 15) / 16, (dims.rows + 15) / 16,
                   1);
   }
+  VkBufferMemoryBarrier output_host_read_barrier{
+      VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER};
+  output_host_read_barrier.srcAccessMask = VK_ACCESS_SHADER_WRITE_BIT;
+  output_host_read_barrier.dstAccessMask = VK_ACCESS_HOST_READ_BIT;
+  output_host_read_barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  output_host_read_barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+  output_host_read_barrier.buffer = output_buffer.handle;
+  output_host_read_barrier.offset = 0;
+  output_host_read_barrier.size = output_buffer.size;
+  vkCmdPipelineBarrier(command, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+                       VK_PIPELINE_STAGE_HOST_BIT, 0, 0, nullptr, 1,
+                       &output_host_read_barrier, 0, nullptr);
   VK_CHECK(vkEndCommandBuffer(command));
   const auto vulkan_setup_ended = std::chrono::steady_clock::now();
   const double vulkan_setup_ms =
@@ -771,24 +787,33 @@ int main(int argc, char **argv) try {
 
   const auto readback_started = std::chrono::steady_clock::now();
   invalidate_if_needed(device, output_buffer);
+  const auto invalidated_ended = std::chrono::steady_clock::now();
   auto *output = static_cast<const float *>(output_buffer.mapped);
   std::vector<float> result(expected.size());
-  float max_error = 0.0f;
+  const uint32_t output_row_stride =
+      kernel == "cooperative" ? padded_output_size : dims.output_size;
+  const auto copy_started = std::chrono::steady_clock::now();
   for (uint32_t row = 0; row < dims.rows; ++row)
-    for (uint32_t column = 0; column < dims.output_size; ++column) {
-      const size_t expected_index =
-          static_cast<size_t>(row) * dims.output_size + column;
-      const size_t output_index =
-          kernel == "cooperative"
-              ? static_cast<size_t>(row) * padded_output_size + column
-              : expected_index;
-      result[expected_index] = output[output_index];
-      if (!std::isfinite(result[expected_index]))
-        throw std::runtime_error("Vulkan output contains a non-finite value");
-      max_error = std::max(max_error,
-                           std::abs(result[expected_index] - expected[expected_index]));
-    }
+    std::memcpy(result.data() + static_cast<size_t>(row) * dims.output_size,
+                output + static_cast<size_t>(row) * output_row_stride,
+                static_cast<size_t>(dims.output_size) * sizeof(float));
+  const auto copy_ended = std::chrono::steady_clock::now();
+  float max_error = 0.0f;
+  for (size_t i = 0; i < result.size(); ++i) {
+    if (!std::isfinite(result[i]))
+      throw std::runtime_error("Vulkan output contains a non-finite value");
+    max_error = std::max(max_error, std::abs(result[i] - expected[i]));
+  }
   const auto readback_ended = std::chrono::steady_clock::now();
+  const double output_invalidate_ms =
+      std::chrono::duration<double, std::milli>(invalidated_ended -
+                                                readback_started)
+          .count();
+  const double output_copy_ms =
+      std::chrono::duration<double, std::milli>(copy_ended - copy_started).count();
+  const double output_validation_ms =
+      std::chrono::duration<double, std::milli>(readback_ended - copy_ended)
+          .count();
   const double output_readback_ms =
       std::chrono::duration<double, std::milli>(readback_ended - readback_started)
           .count();
@@ -813,8 +838,25 @@ int main(int argc, char **argv) try {
       << "  \"weight_layout\": \"" << weight_layout << "\",\n"
       << "  \"buffer_memory_type_index\": " << input_buffer.memory_type_index
       << ",\n"
+      << "  \"output_buffer_memory_type_index\": "
+      << output_buffer.memory_type_index << ",\n"
+      << "  \"output_buffer_device_local\": "
+      << ((output_buffer.memory_properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+              ? "true"
+              : "false")
+      << ",\n"
       << "  \"buffer_memory_device_local\": "
       << ((input_buffer.memory_properties & VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
+              ? "true"
+              : "false")
+      << ",\n"
+      << "  \"output_buffer_host_coherent\": "
+      << ((output_buffer.memory_properties & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT)
+              ? "true"
+              : "false")
+      << ",\n"
+      << "  \"output_buffer_host_cached\": "
+      << ((output_buffer.memory_properties & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
               ? "true"
               : "false")
       << ",\n"
@@ -855,6 +897,9 @@ int main(int argc, char **argv) try {
             << "  \"median_dispatch_ms\": " << median(dispatch_samples) << ",\n"
             << "  \"median_upload_plus_dispatch_ms\": "
             << median(upload_dispatch_samples) << ",\n"
+            << "  \"output_invalidate_ms\": " << output_invalidate_ms << ",\n"
+            << "  \"output_copy_ms\": " << output_copy_ms << ",\n"
+            << "  \"output_validation_ms\": " << output_validation_ms << ",\n"
             << "  \"output_readback_ms\": " << output_readback_ms << ",\n"
             << "  \"output_file_write_ms\": " << output_file_write_ms << ",\n"
             << "  \"probe_elapsed_before_output_file_write_ms\": "

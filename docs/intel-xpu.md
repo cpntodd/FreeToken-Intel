@@ -605,13 +605,15 @@ runtime reports a compatible FP16-input/FP32-accumulator subgroup tuple, the req
 Vulkan 1.1/1.2 features are enabled, and `glslc` successfully builds the shader.
 Otherwise `best` uses the measured FP32 baseline.
 
-Buffers prefer memory that is both `DEVICE_LOCAL` and `HOST_VISIBLE`; the current
-B580 selects memory type 3, backed by its device-local heap and also host coherent. On a
-device without coherent host-visible memory, the probe flushes uploads and invalidates
-the mapped output. This is Vulkan-owned mapped memory, not a proven shared allocation
-with PyTorch XPU. The cooperative probe pads row, input, and output dimensions to the
-queried matrix tile and validates against a CPU FP32 reference using the same FP16
-rounded inputs and weights.
+Input and weight buffers prefer memory that is both `DEVICE_LOCAL` and `HOST_VISIBLE`;
+the current B580 selects coherent memory type 3. The output instead prefers
+`HOST_CACHED` mapped memory for efficient CPU reads and selects coherent, cached memory
+type 2 on this B580; it is not device-local. A compute-write-to-host-read buffer
+barrier precedes queue completion and CPU access. On a device without coherent memory,
+the probe flushes uploads and invalidates the mapped output. These are Vulkan-owned
+allocations, not proven shared memory with PyTorch XPU. The cooperative probe pads row,
+input, and output dimensions to the queried matrix tile and validates against a CPU
+FP32 reference using the same FP16-rounded inputs and weights.
 
 ```bash
 bash experiments/vulkan/run_probe.sh both 8 256 512 20
@@ -631,12 +633,14 @@ per-call input write and blocking queue completion, but excludes static weight p
 and upload (reported separately as `weight_upload_ms`) and any Vulkan-to-PyTorch output
 handoff.
 
-A fresh direct `best` run on the `8x256` by `256x512` shape again selected the B580
-cooperative FP16/FP32 path with an `8x16x16` tile. Across 20 iterations, median dispatch
-was 0.255 ms and median upload-plus-dispatch was 0.255 ms; weight upload was 0.277 ms
-and max absolute error was `8.34e-7`. The host smoke test also passed its explicit B580
-device-ID (`0xE20B`) and parity assertions. This is a single synthetic-operation check,
-not persistent model-weight or serving evidence.
+A fresh direct cooperative run on the `8x256` by `256x512` shape selected the B580
+FP16/FP32 path with an `8x16x16` tile. Across 20 iterations, median submit-through-
+queue-idle time was 0.234 ms and median input-upload-plus-submit-through-idle was
+0.235 ms; weight upload was 0.132 ms, output readback was 0.020 ms, and maximum
+absolute error was `8.34e-7`. It selected coherent device-local input/weight memory
+type 3 and coherent cached host output memory type 2. These are host-side timings, not
+isolated shader execution times, and this is still a synthetic operation rather than
+persistent model-weight or serving evidence.
 
 `bench_llama_qkv_island.py` adds an opt-in real-operation experiment. It loads a local
 Llama GGUF on XPU, captures eight rows at `LlamaAttention._project_qkv` layer 0, rounds
@@ -657,16 +661,19 @@ FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
 On 2026-09-21 this captured an `8x2048` activation and a `3072x2048` layer-0 QKV
 weight on the Arc B580 (`0xE20B`, driver `1.6.33578+15`); Vulkan selected the same B580
 and its `8x16x16` cooperative FP16/FP32 path. Against XPU FP32 on identical FP16
-operands, maximum absolute error was `2.52e-4` and relative L2 error was `1.01e-5`.
+operands, maximum absolute error was `2.53e-4` and relative L2 error was `1.01e-5`.
 Casting the Vulkan result back to BF16 differed from the native BF16 QKV output by
 `0.015625` maximum absolute error (`1.66e-4` relative L2); this includes operand
 conversion and is not an isolated backend error. Five warmed dispatches measured
-0.622 ms median dispatch and 0.628 ms median upload-plus-dispatch; the static weight
-upload took 4.94 ms. One mapped-output invalidation/readback measured 47.74 ms, so the
-kernel timing is not an end-to-end latency claim. Compilation and the complete probe
-invocation took 3.53 s. This validates one loaded operation on one checkpoint, not
-serving, persistent model-weight ownership, PyTorch/Vulkan memory sharing, broad model
-quality, or steady-state performance.
+0.420 ms median submit-through-queue-idle time and 0.426 ms median input-upload-plus-
+submit-through-idle; static weight upload took 4.87 ms. With the host-cached output
+allocation, invalidation, copy, validation, and total output readback measured 0.00004,
+0.0253, 0.0587, and 0.120 ms respectively. The 96 KiB result was bit-identical to the
+prior device-local and cached-allocation captures. The barrier-enabled probe passed a
+single run with `VK_LAYER_KHRONOS_validation` and five uninstrumented iterations. These
+host timings are not isolated shader time or end-to-end latency. This validates one
+loaded operation on one checkpoint, not serving, persistent model-weight ownership,
+PyTorch/Vulkan memory sharing, broad model quality, or steady-state performance.
 
 Run this odd-dimension validation-layer smoke:
 
