@@ -163,6 +163,31 @@ class GGUFUntiedLMHead(BaseOP):
         return self.proj.forward(x)
 
 
+class GGUFTiedLMHead:
+    """Tied LM head backed by the native packed GGUF embedding table."""
+
+    def __init__(self, embedding, quant_type: int):
+        self._embedding = embedding
+        self._quant_type = quant_type
+
+    def state_dict(self, *, prefix: str = "", result=None):
+        return result if result is not None else {}
+
+    def load_state_dict(self, state_dict, *, prefix: str = "", _internal: bool = False):
+        state_dict.pop(f"{prefix}.weight", None)
+        state_dict.pop(f"{prefix}.bias", None)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        from freetoken.core import get_global_ctx
+        from freetoken.layers.gguf import fused_mul_mat_gguf
+
+        batch = get_global_ctx().batch
+        if batch.is_prefill:
+            indices = batch.attn_metadata.get_last_indices(batch.size)
+            x = x[indices].contiguous()
+        return fused_mul_mat_gguf(x, self._embedding.qweight, self._quant_type)
+
+
 def _type(config: ModelConfig, name: str) -> int:
     assert config.gguf_tensor_types is not None
     try:
@@ -230,12 +255,13 @@ def convert_qwen35_to_gguf(model, config: ModelConfig) -> None:
         )
 
     if config.tie_word_embeddings:
-        raise NotImplementedError(
-            "tied Qwen3.8 GGUF output heads are not yet supported"
+        model.lm_head = GGUFTiedLMHead(
+            inner.embed_tokens, _type(config, "token_embd.weight")
         )
-    model.lm_head = GGUFUntiedLMHead(
-        config.hidden_size, config.vocab_size, _type(config, "output.weight")
-    )
+    else:
+        model.lm_head = GGUFUntiedLMHead(
+            config.hidden_size, config.vocab_size, _type(config, "output.weight")
+        )
 
 
 _DENSE_MAP = {
@@ -289,6 +315,8 @@ def iter_gguf_weights(
             yield "model.embed_tokens.qweight", tensor.packed()
             continue
         if name == "output.weight":
+            if config.tie_word_embeddings:
+                continue
             yield "lm_head.proj.qweight", tensor.packed()
             continue
         if name == "output_norm.weight":

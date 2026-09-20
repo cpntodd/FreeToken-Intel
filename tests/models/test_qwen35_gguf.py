@@ -110,3 +110,64 @@ def test_qwen35_gguf_v_head_layout_round_trip():
 
     torch.testing.assert_close(tiled[:, :, 0], grouped[:, [0, 3, 1, 4, 2, 5], 0])
     torch.testing.assert_close(op._v_tiled_to_grouped(tiled), grouped)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_qwen35_tied_gguf_head_uses_embedding_on_xpu(monkeypatch):
+    from types import SimpleNamespace
+
+    from freetoken import core
+    from freetoken.layers.gguf import GGUFEmbedding, fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_Q4_0
+    from freetoken.models.qwen3_5_moe.gguf import GGUFTiedLMHead
+
+    monkeypatch.setattr(
+        core,
+        "_GLOBAL_CTX",
+        SimpleNamespace(batch=SimpleNamespace(is_prefill=False)),
+    )
+    generator = torch.Generator().manual_seed(603)
+    embedding = GGUFEmbedding(7, 32, GGML_Q4_0)
+    packed = torch.randint(0, 256, (7, 18), dtype=torch.uint8, generator=generator)
+    packed[:, :2] = torch.tensor([0.5], dtype=torch.float16).view(torch.uint8)
+    embedding.qweight = packed.to("xpu")
+    hidden = torch.randn(2, 32, dtype=torch.bfloat16, generator=generator).to("xpu")
+
+    actual = GGUFTiedLMHead(embedding, GGML_Q4_0).forward(hidden)
+    expected = fused_mul_mat_gguf(hidden, embedding.qweight, GGML_Q4_0)
+    torch.xpu.synchronize()
+
+    assert actual.device.type == "xpu"
+    torch.testing.assert_close(actual, expected)
+
+
+def test_qwen35_tied_gguf_ignores_redundant_output_weight(monkeypatch):
+    from types import SimpleNamespace
+
+    from freetoken import utils
+    from freetoken.models.gguf import reader
+    from freetoken.models.qwen3_5_moe import gguf
+
+    config = SimpleNamespace(
+        tie_word_embeddings=True,
+        num_layers=0,
+    )
+    redundant_output = SimpleNamespace(
+        name="output.weight",
+        packed=lambda: torch.empty((1, 18), dtype=torch.uint8),
+    )
+    monkeypatch.setattr(utils, "cached_load_hf_config", lambda _path: object())
+    monkeypatch.setattr(gguf, "parse_gguf_config", lambda _shim: config)
+    monkeypatch.setattr(reader, "iter_gguf_tensors", lambda _path: [redundant_output])
+
+    assert (
+        list(
+            gguf.iter_gguf_weights(
+                "tied.gguf",
+                torch.device("cpu"),
+                include_moe_experts=False,
+                include_non_moe=True,
+            )
+        )
+        == []
+    )
