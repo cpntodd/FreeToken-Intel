@@ -3,6 +3,7 @@ from __future__ import annotations
 import math
 
 import torch
+from freetoken.accelerator import release_device_cache
 from freetoken.distributed import get_tp_info
 from freetoken.env import ENV
 from freetoken.models.config import LinearGatedDeltaGroupConfig, SlotStateSpec
@@ -153,9 +154,7 @@ class LinearStatePool:
         self.conv_states = None
         self.recurrent_states = None
         self.slot_states = {}
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-            torch.cuda.empty_cache()
+        release_device_cache(device)
         self.conv_states = torch.zeros(
             (n_layers, num_slots, local_conv_dim, km1), dtype=conv_dtype, device=device
         )

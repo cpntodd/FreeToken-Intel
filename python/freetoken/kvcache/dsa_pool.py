@@ -20,6 +20,8 @@ from __future__ import annotations
 
 import torch
 
+from freetoken.accelerator import release_device_cache
+
 from .base import BaseKVCachePool
 
 
@@ -105,9 +107,7 @@ class MLAKVCache(BaseKVCachePool):
         """In-place resize (frees the old slab first; object identity preserved --
         callers re-derive views per forward, same contract as MHAKVCache.rebuild)."""
         self._kv_buffer = None
-        if self._device.type == "cuda":
-            torch.cuda.synchronize(self._device)
-            torch.cuda.empty_cache()
+        release_device_cache(self._device)
         self._alloc(num_pages)
 
     @classmethod

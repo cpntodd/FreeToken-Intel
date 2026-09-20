@@ -20,6 +20,29 @@ def supports_pinned_host_memory(torch_module: Any = torch) -> bool:
     return False
 
 
+def release_device_cache(
+    device: Any, torch_module: Any = torch, *, synchronize: bool = True
+) -> bool:
+    """Synchronize and release allocator cache for an available accelerator device.
+
+    Returns whether a CUDA or XPU runtime was selected. CPU devices and unavailable
+    accelerator APIs deliberately do nothing; callers must never substitute CUDA for XPU.
+    """
+    kind = getattr(device, "type", None)
+    if kind not in {"cuda", "xpu"}:
+        return False
+    try:
+        runtime = _runtime(kind, torch_module)
+    except RuntimeError:
+        return False
+    if not runtime.is_available():
+        return False
+    if synchronize:
+        runtime.synchronize(device)
+    runtime.empty_cache()
+    return True
+
+
 @dataclass(frozen=True)
 class AcceleratorCapabilities:
     kind: AcceleratorKind

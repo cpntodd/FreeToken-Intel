@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Sequence
 
 import torch
+from freetoken.accelerator import release_device_cache
 from freetoken.distributed import get_tp_info
 from freetoken.utils import div_even
 
@@ -70,9 +71,7 @@ class MHAKVCache(BaseKVCachePool):
         self._k_buffer = None
         self._v_buffer = None
         self._kv_buffer = None
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-            torch.cuda.empty_cache()
+        release_device_cache(device)
         self._kv_buffer = torch.empty(
             (2, num_storage_layers, num_pages, page_size, local_kv_heads, head_dim),
             device=device,

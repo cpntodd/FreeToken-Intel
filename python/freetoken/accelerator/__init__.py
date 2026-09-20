@@ -7,6 +7,7 @@ from .runtime import (
     XpuRuntime,
     discover_accelerators,
     probe_accelerators,
+    release_device_cache,
     resolve_runtime,
     validate_runtime_request,
 )
@@ -36,6 +37,7 @@ __all__ = [
     "XpuRuntime",
     "discover_accelerators",
     "probe_accelerators",
+    "release_device_cache",
     "resolve_runtime",
     "validate_runtime_request",
 ]

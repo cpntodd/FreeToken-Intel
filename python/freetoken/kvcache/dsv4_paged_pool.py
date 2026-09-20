@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import torch
 
+from freetoken.accelerator import release_device_cache
 from freetoken.utils import init_logger
 
 from .base import BaseKVCachePool
@@ -453,8 +454,7 @@ class DSV4PagedKVCache(BaseKVCachePool):
         self.state_ring = self.indexer_state_ring = None
         self.full_to_window = None
         gc.collect()
-        if torch.cuda.is_available():
-            torch.cuda.empty_cache()
+        release_device_cache(self._device, synchronize=False)
         self._alloc_buffers()
         self._init_paged_state(*self._paged_params)
 

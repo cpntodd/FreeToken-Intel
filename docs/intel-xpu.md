@@ -123,6 +123,11 @@ Current constraints are explicit: one XPU only, eager execution only, and the po
 `torch` attention backend for FULL/SWA models. CUDA graphs, CUDA device identifiers, and
 tensor parallel XPU launches are rejected rather than silently falling back.
 
+KV and recurrent-state cache rebuilds release their old slabs through the selected CUDA
+or XPU runtime before allocating replacements. On the B580, an XPU MHA cache resize kept
+both old and new slabs on `xpu:0`; CPU devices and unavailable accelerator APIs are
+intentional no-ops rather than a CUDA fallback.
+
 ## Device capability report
 
 Run `ft devices` to list CUDA and XPU devices, memory, driver/platform identifiers, and

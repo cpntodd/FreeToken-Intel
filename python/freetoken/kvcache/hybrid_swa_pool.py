@@ -4,6 +4,7 @@ from dataclasses import dataclass
 from typing import Sequence
 
 import torch
+from freetoken.accelerator import release_device_cache
 from freetoken.distributed import get_tp_info
 from freetoken.models.config import KVCacheGroupSpec
 from freetoken.utils import align_ceil, div_even
@@ -283,9 +284,7 @@ class HybridSWAKVCache(BaseKVCachePool):
         self.full_kv_pool = None
         self.swa_kv_pool = None
         self._storages = {}
-        if self._device.type == "cuda":
-            torch.cuda.synchronize(self._device)
-            torch.cuda.empty_cache()
+        release_device_cache(self._device)
         self.full_kv_pool = self._alloc_group(full_geom, outer_size=num_full_pages, inner_size=page_size)
         self.swa_kv_pool = self._alloc_group(swa_geom, outer_size=self._swa_num_tokens, inner_size=1)
         self._storages = {"full": self.full_kv_pool, "swa": self.swa_kv_pool}

@@ -9,6 +9,7 @@ from freetoken.accelerator import (
     XpuRuntime,
     discover_accelerators,
     probe_accelerators,
+    release_device_cache,
     resolve_runtime,
     validate_runtime_request,
 )
@@ -99,6 +100,46 @@ def test_explicit_unavailable_backend_never_falls_back():
 
     with pytest.raises(RuntimeError, match="xpu: unavailable"):
         resolve_runtime("xpu", fake)
+
+
+@pytest.mark.parametrize("kind", ("cuda", "xpu"))
+def test_release_device_cache_uses_the_selected_accelerator(kind):
+    cuda = FakeApi(available=kind == "cuda", names=("NVIDIA",))
+    xpu = FakeApi(available=kind == "xpu", names=("Intel Arc",))
+    fake = FakeTorch(cuda=cuda, xpu=xpu)
+    device = SimpleNamespace(type=kind)
+
+    assert release_device_cache(device, fake) is True
+    selected = cuda if kind == "cuda" else xpu
+    other = xpu if kind == "cuda" else cuda
+    assert selected.synchronized is device
+    assert selected.emptied is True
+    assert not hasattr(other, "synchronized")
+    assert not hasattr(other, "emptied")
+
+
+def test_release_device_cache_is_a_noop_for_cpu_or_unavailable_xpu():
+    cuda = FakeApi(available=False, names=())
+    xpu = FakeApi(available=False, names=())
+    fake = FakeTorch(cuda=cuda, xpu=xpu)
+
+    assert release_device_cache(SimpleNamespace(type="cpu"), fake) is False
+    assert release_device_cache(SimpleNamespace(type="xpu"), fake) is False
+    assert not hasattr(cuda, "synchronized")
+    assert not hasattr(xpu, "synchronized")
+
+
+def test_release_device_cache_can_preserve_an_asynchronous_rebuild():
+    cuda = FakeApi(available=False, names=())
+    xpu = FakeApi(available=True, names=("Intel Arc",))
+    fake = FakeTorch(cuda=cuda, xpu=xpu)
+
+    assert (
+        release_device_cache(SimpleNamespace(type="xpu"), fake, synchronize=False)
+        is True
+    )
+    assert not hasattr(xpu, "synchronized")
+    assert xpu.emptied is True
 
 
 def test_discovery_reports_both_backend_namespaces():
