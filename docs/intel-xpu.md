@@ -60,6 +60,12 @@ generated `Hello!` for the default chat prompt. This is a correctness baseline, 
 the final packed-quantized execution path; the dense BF16 expansion increases device
 memory use and load time.
 
+On 2026-09-20, the same host reran `Llama-3.2-1B-Instruct-Q4_K_M.gguf` through the
+public `LLM` API on the B580 (PCI `0xE20B`, driver `1.6.33578+15`, Level-Zero V2).
+The 35-token prompt ran at 10.29 tokens/s and produced `Hello!` (token IDs 9906, 0);
+load took 21.48 s and generation took 3.50 s including prefill. This is a short
+functional run, not a packed-quantized performance result.
+
 Dense Qwen3.8 GGUF checkpoints use a memory-feasible native packed path rather than
 expanding the 27B model to BF16. The adapter preserves each source tensor's GGML type,
 supports the checkpoint's mixed K/IQ/Q8 formats, reverses llama.cpp's tiled GDN value-head
@@ -135,6 +141,13 @@ PYTHONPATH=python .venv/bin/python benchmarks/bench_openvino_island.py \
   --source xpu --tokens 32 --hidden-size 1024 --output-size 4096
 ```
 
+The benchmark compares the complete OpenVINO path, including host staging, with
+source-device eager execution and checks output parity. On the B580, a 32-token
+`5120 -> 10240` projection measured 2.21 ms through the OpenVINO island versus
+0.33 ms for eager XPU (6.6x slower); maximum absolute output error was 0.0078125.
+This is evidence for the current staging cost, not a general OpenVINO-versus-XPU
+performance claim. A zero-copy or larger fused island requires a separate benchmark.
+
 OpenVINO's C++ GPU Remote Tensor API supports USM pointers, but direct ownership-safe
 PyTorch XPU interoperability has not yet been proven in this Python integration. Host
 staging remains intentional until that proof exists.
@@ -166,3 +179,22 @@ boundary with PyTorch XPU, and the naive shader is a correctness probe rather th
 production GEMM. Promotion into a `KernelProvider` requires device-local tiled kernels,
 reusable pipelines/descriptors, and measured transfer amortization over a substantially
 larger compute island.
+
+## Bonsai PQ2_0 compatibility
+
+The local `Ternary-Bonsai-27B-PQ2_0.gguf` and
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` files both declare `qwen35`, but the current
+`gguf-py` reader rejects their private tensor type 142 before FreeToken reaches model
+construction or GPU execution. It must not be treated as upstream Q2_0: PQ2_0 uses
+group size 128 (34 bytes per block), while upstream Q2_0 is group size 64. The
+[Prism block definition](https://github.com/PrismML-Eng/llama.cpp/blob/prism/ggml/src/ggml-common.h#L2460-L2475)
+and [upstream tracking issue](https://github.com/ggml-org/llama.cpp/issues/29058)
+describe the distinction.
+
+The older Ternary-Bonsai file has no `prism.hadamard.*` metadata. Bonsai 2 additionally
+declares a block-1024 normalized Walsh-Hadamard transform, explicit signs, and grouped
+GDN values. Registering type 142 alone would therefore not establish Bonsai 2
+correctness. Neither file has completed inference in FreeToken; support requires a
+format-aware reader/kernel and, for Bonsai 2, model-transform handling with reference
+parity. Until then these checkpoints fail explicitly at GGUF parsing rather than
+silently being interpreted as another quant format.
