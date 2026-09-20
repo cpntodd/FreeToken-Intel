@@ -72,6 +72,7 @@ def fused_mul_mat_gguf(
             q3_k_matvec_sycl,
             q4_k_matvec_sycl,
             q5_k_matvec_sycl,
+            q6_k_matvec_sycl,
             q8_0_matvec_sycl,
         )
 
@@ -87,6 +88,8 @@ def fused_mul_mat_gguf(
             return q4_k_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q5_K:
             return q5_k_matvec_sycl(x, qweight)
+        if qweight_type == GGML_Q6_K:
+            return q6_k_matvec_sycl(x, qweight)
         if qweight_type == GGML_IQ3_XXS:
             from freetoken.models.gguf.dequant import _iq_signs, _iq_table
 

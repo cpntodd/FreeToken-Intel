@@ -190,6 +190,74 @@ def test_sycl_q5_k_matvec_matches_dequantized_reference(dtype, batch):
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch", [1, 3, 4, 5])
+def test_sycl_q6_k_matvec_matches_dequantized_reference(dtype, batch):
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_Q6_K, dequantize
+
+    generator = torch.Generator().manual_seed(83)
+    qweight = torch.randint(0, 256, (11, 420), dtype=torch.uint8, generator=generator)
+    blocks = qweight.view(11, 2, 210)
+    blocks[:, :, 208:210] = torch.tensor([0, 52], dtype=torch.uint8)
+    x_cpu = torch.randn(batch, 512, dtype=dtype, generator=generator)
+    weight = dequantize(qweight, GGML_Q6_K, torch.float32).reshape(11, 512)
+    expected = (x_cpu.float() @ weight.T).to(dtype)
+
+    actual = fused_mul_mat_gguf(x_cpu.to("xpu"), qweight.to("xpu"), GGML_Q6_K)
+    torch.xpu.synchronize()
+
+    tolerance = 5e-5 if dtype == torch.float32 else 6e-2
+    torch.testing.assert_close(actual.cpu(), expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_sycl_q6_k_matvec_rejects_invalid_geometry():
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_Q6_K
+
+    x = torch.randn(1, 300, device="xpu")
+    qweight = torch.empty((2, 210), dtype=torch.uint8, device="xpu")
+    with pytest.raises(RuntimeError, match="divisible by 256"):
+        fused_mul_mat_gguf(x, qweight, GGML_Q6_K)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_sycl_q6_k_matvec_rejects_unsupported_input_dtype():
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_Q6_K
+
+    x = torch.randn(1, 256, dtype=torch.float16, device="xpu")
+    qweight = torch.empty((2, 210), dtype=torch.uint8, device="xpu")
+    with pytest.raises(RuntimeError, match="supports float32 and bfloat16"):
+        fused_mul_mat_gguf(x, qweight, GGML_Q6_K)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_fused_mul_mat_gguf_dispatches_q6_k_to_sycl(monkeypatch):
+    from freetoken.kernel.sycl import causal_conv1d
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_Q6_K
+
+    x = torch.empty((1, 256), device="xpu")
+    qweight = torch.empty((2, 210), dtype=torch.uint8, device="xpu")
+    expected = torch.empty((1, 2), device="xpu")
+    calls = []
+
+    def dispatch(actual_x, actual_qweight):
+        calls.append((actual_x, actual_qweight))
+        return expected
+
+    monkeypatch.setattr(causal_conv1d, "q6_k_matvec_sycl", dispatch)
+    actual = fused_mul_mat_gguf(x, qweight, GGML_Q6_K)
+
+    assert actual is expected
+    assert len(calls) == 1
+    assert calls[0][0] is x
+    assert calls[0][1] is qweight
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("batch", [3, 5])
 def test_sycl_iq3_xxs_matvec_matches_dequantized_reference(dtype, batch):
     from freetoken.layers.gguf import fused_mul_mat_gguf

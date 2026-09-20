@@ -128,13 +128,32 @@ ownership and stream ordering remain inside the existing engine. FP32 and BF16 o
 and in-place state updates are validated on the Arc B580.
 
 The same extension includes direct packed GGUF matvec kernels for Q8_0, Q2_K, Q3_K,
-Q4_K, Q5_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS, and IQ4_XS. XPU
+Q4_K, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS, and IQ4_XS. XPU
 `GGUFLinear` dispatches these formats without materializing a full dense weight or
 falling back to CPU. Synthetic FP32/BF16 device tests cover each format, real slices
 from the Qwen3.8 checkpoint match the FP32 dequantized reference, and the complete
 packed Qwen serving model has run through the public `LLM` API on the B580. Every
 active-serving format has both a direct small-batch path and a four-token tiled path
-for batches of four or more. Q6_K is present only in the omitted MTP layer.
+for batches of four or more. Q6_K uses a four-token tiled SYCL path. In the recorded
+Qwen3.8 checkpoint, Q6_K is present only in the MTP layer that serving currently omits;
+the new path enables direct execution for other Q6_K GGUF layers and checkpoints.
+
+The host B580's `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` exercises Q6_K in the tied output
+embedding. A forced eight-token run returned seven tokens (six decode intervals):
+TTFT 8.36 s, decode 0.540 tokens/s, and 19.63 s generation time. Repeating the same
+settings with a runtime override that reproduces the previous chunked dequantize-plus-
+matmul fallback measured TTFT 7.73 s, 0.548 decode tokens/s, and 18.81 s generation.
+Both runs emitted the same token IDs. These are single cold runs and show no throughput
+win; the direct kernel's current value is avoiding dense Q6_K expansion while preserving
+output behavior. Forced-length output included repeated special tokens, so this is a
+kernel/serving-path check, not a quality sample.
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
+  benchmarks/bench_xpu_gemma4.py \
+  /home/oddsoul/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --max-tokens 8 --force-decode-length --context 128 --kv-tokens 256
+```
 
 Build the extension with an `icpx` compiler from the same oneAPI release as the SYCL
 runtime bundled by PyTorch. For the validated `torch==2.12.1+xpu` wheel, that is oneAPI
