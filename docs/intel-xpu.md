@@ -65,6 +65,11 @@ execution path and timer, not response quality or steady-state speed. During the
 `nvtop` identified Battlemage G21 / Arc B580 and showed 34% memory use at 2.15 GHz; its
 GPU-utilisation field was unavailable.
 
+After the GGUF USER_DEFINED-token fix, a normal four-token regression smoke also loaded
+this Gemma checkpoint on the B580. The 20-token prompt returned IDs `9259, 236888`
+(`Hello!`); load took 47.88 s and TTFT was 20.03 s. This confirms the shared tokenizer
+change did not break this Gemma path, but it is not a throughput or model-quality result.
+
 Use `--max-tokens 64 --force-decode-length` for a longer decode sample. That option
 ignores EOS until the token limit and is intended for measurement, not normal generation.
 The earlier one-token B580 smoke timing used the old whole-generation timer and is not
