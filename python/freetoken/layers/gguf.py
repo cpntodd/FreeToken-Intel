@@ -20,19 +20,20 @@ from freetoken.models.gguf.dequant import (
     GGML_BF16,
     GGML_F16,
     GGML_F32,
+    GGML_IQ1_M,
+    GGML_IQ1_S,
+    GGML_IQ2_S,
+    GGML_IQ2_XS,
+    GGML_IQ2_XXS,
+    GGML_IQ3_S,
+    GGML_IQ3_XXS,
+    GGML_IQ4_XS,
     GGML_NAME,
     GGML_Q2_K,
     GGML_Q3_K,
     GGML_Q4_0,
     GGML_Q4_K,
     GGML_Q5_K,
-    GGML_IQ3_XXS,
-    GGML_IQ2_S,
-    GGML_IQ3_S,
-    GGML_IQ2_XXS,
-    GGML_IQ2_XS,
-    GGML_IQ4_XS,
-    GGML_IQ1_S,
     GGML_Q6_K,
     GGML_Q8_0,
     row_bytes,
@@ -51,17 +52,20 @@ _DEQUANT = {GGML_Q4_0, GGML_Q4_K, GGML_Q8_0, GGML_Q6_K}
 _MMVQ_SAFE = 6
 
 
-def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int) -> torch.Tensor:
+def fused_mul_mat_gguf(
+    x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
+) -> torch.Tensor:
     """y = x @ dequant(qweight).T, dispatched by batch size and quant type."""
     if x.device.type == "xpu":
         from freetoken.kernel.sycl.causal_conv1d import (
+            iq1_m_matvec_sycl,
             iq1_s_matvec_sycl,
-            iq4_xs_matvec_sycl,
+            iq2_s_matvec_sycl,
             iq2_xs_matvec_sycl,
             iq2_xxs_matvec_sycl,
-            iq2_s_matvec_sycl,
             iq3_s_matvec_sycl,
             iq3_xxs_matvec_sycl,
+            iq4_xs_matvec_sycl,
             q2_k_matvec_sycl,
             q3_k_matvec_sycl,
             q4_k_matvec_sycl,
@@ -112,6 +116,10 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
             from freetoken.models.gguf.dequant import _iq_table
 
             return iq1_s_matvec_sycl(x, qweight, _iq_table("IQ1_S", x.device))
+        if qweight_type == GGML_IQ1_M:
+            from freetoken.models.gguf.dequant import _iq_table
+
+            return iq1_m_matvec_sycl(x, qweight, _iq_table("IQ1_M", x.device))
         if qweight_type == GGML_IQ2_S:
             from freetoken.models.gguf.dequant import _iq_table
 
@@ -153,9 +161,13 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
     if qweight_type in _DEQUANT:
         block, type_size = BLOCK_SHAPE[qweight_type]
         in_features = qweight.shape[1] // type_size * block
-        weight = ggml_dequantize(qweight, qweight_type, out_features, in_features, x.dtype)
+        weight = ggml_dequantize(
+            qweight, qweight_type, out_features, in_features, x.dtype
+        )
         return x @ weight.T
-    raise NotImplementedError(f"unsupported GGUF type {GGML_NAME.get(qweight_type, qweight_type)}")
+    raise NotImplementedError(
+        f"unsupported GGUF type {GGML_NAME.get(qweight_type, qweight_type)}"
+    )
 
 
 class GGUFLinear(BaseOP):
@@ -171,7 +183,9 @@ class GGUFLinear(BaseOP):
         self.in_features = in_features
         self.out_features = out_features
         self._quant_type = quant_type
-        self.qweight = torch.empty(out_features, row_bytes(in_features, quant_type), dtype=torch.uint8)
+        self.qweight = torch.empty(
+            out_features, row_bytes(in_features, quant_type), dtype=torch.uint8
+        )
         self.bias = torch.empty(out_features) if has_bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -226,7 +240,11 @@ class GGUFEmbedding(BaseOP):
             from freetoken.kernel.gguf import ggml_dequantize
 
             y = ggml_dequantize(
-                rows, self._quant_type, flat.shape[0], self.embedding_dim, torch.bfloat16
+                rows,
+                self._quant_type,
+                flat.shape[0],
+                self.embedding_dim,
+                torch.bfloat16,
             )
         else:
             from freetoken.models.gguf.dequant import dequantize
@@ -237,7 +255,9 @@ class GGUFEmbedding(BaseOP):
         y = y.view(*x.shape, self.embedding_dim)
         if self._embed_scale is not None:
             if self._embed_scale_t is None:
-                self._embed_scale_t = torch.tensor(self._embed_scale, dtype=y.dtype, device=y.device)
+                self._embed_scale_t = torch.tensor(
+                    self._embed_scale, dtype=y.dtype, device=y.device
+                )
             y = y * self._embed_scale_t
         return y
 
