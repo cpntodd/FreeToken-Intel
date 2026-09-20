@@ -17,7 +17,7 @@ PROBE = ROOT / "experiments" / "vulkan" / "run_probe.sh"
 )
 def test_vulkan_dense_probe_executes_on_intel_discrete_gpu():
     completed = subprocess.run(
-        ["bash", str(PROBE)],
+        ["bash", str(PROBE), "best"],
         cwd=ROOT,
         check=True,
         capture_output=True,
@@ -30,4 +30,5 @@ def test_vulkan_dense_probe_executes_on_intel_discrete_gpu():
     assert result["device_id"] == 0xE20B
     assert "BMG" in result["device"]
     assert result["max_abs_error"] <= 1e-3
-    assert result["dispatch_ms"] > 0
+    assert result["kernel"] in {"naive_fp32", "tiled_fp32", "cooperative_fp16_fp32_acc"}
+    assert result["median_dispatch_ms"] > 0
