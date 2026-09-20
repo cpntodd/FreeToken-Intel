@@ -27,5 +27,17 @@ batch size x miss rate.
 python benchmarks/bench_offload_cache_copy.py
 ```
 
+**`bench_sycl_gguf_batches.py`** — B580 microbenchmark comparing direct packed SYCL
+matvecs for Q4_0, Q4_1, IQ4_NL, Q5_0, and Q5_1 against the XPU dequantize-plus-matmul
+path. Uses synthetic packed weights and checks output parity before timing; it is not an
+end-to-end model benchmark.
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
+  benchmarks/bench_sycl_gguf_batches.py \
+  --tokens 1,4,8,16,32 --rows 4096 --in-features 5120 \
+  --dtype bf16 --warmup 3 --iterations 15
+```
+
 For host RAM vs PCIe bandwidth and the offload/hybrid backend pick, use `ft bench bw`
 instead — it writes the JSON profile the engine reads.

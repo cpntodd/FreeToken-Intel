@@ -255,6 +255,16 @@ for IQ4_NL; output parity passed for all four. These are synthetic samples, not
 end-to-end model performance. The focused GGUF dequant and SYCL accelerator suites
 passed 157 tests on the B580. The decode-only dispatch avoids CPU fallback while
 keeping prompt batches on XPU matmul.
+
+A separate batch sweep compared the five kernels above with the exact XPU
+dequantize-plus-matmul fallback at `[tokens, 5120] x [4096, 5120]` in BF16. On the
+Arc B580, with three warmups and 15 timed iterations, all 25 cases passed output parity.
+Across formats, direct-SYCL speedups were 6.0-11.8x at one token, 7.1-10.8x at four,
+3.9-5.7x at eight, and 2.0-2.9x at sixteen. At 32 tokens the range narrowed to
+0.99-1.46x; Q4_1 was marginally slower than the fallback. These synthetic timings do
+not establish end-to-end model gains, so dispatch remains decode-only pending a same-model
+comparison. Reproduce with `benchmarks/bench_sycl_gguf_batches.py` (documented in
+`benchmarks/README.md`).
 Other active-serving packed formats retain their small-batch and four-token tiled paths.
 In the recorded Qwen3.8 checkpoint, Q6_K is
 present only in the MTP layer that serving currently omits. A bounded probe now reads
