@@ -5,6 +5,8 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from freetoken.accelerator.runtime import supports_pinned_host_memory
+
 if TYPE_CHECKING:
     from freetoken.core import Batch
 
@@ -56,7 +58,7 @@ def build_fla_metadata(batch: "Batch", device: torch.device) -> FLAMetadata:
     builder serves the eager scheduler path and direct-op test callers.
     """
     reqs = batch.padded_reqs
-    pin = {"device": "cpu", "pin_memory": torch.cuda.is_available()}
+    pin = {"device": "cpu", "pin_memory": supports_pinned_host_memory()}
 
     # GDN state slot per request: the hybrid-radix live slot (decoupled from table_idx) when
     # allocated, else table_idx (naive / force-naive GDN models keep the old keying).

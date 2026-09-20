@@ -10,6 +10,16 @@ AcceleratorKind = Literal["cuda", "xpu"]
 AcceleratorProbeState = Literal["available", "unavailable", "error", "partial"]
 
 
+def supports_pinned_host_memory(torch_module: Any = torch) -> bool:
+    """Return whether an available CUDA or XPU runtime can use pinned host buffers."""
+    for name in ("cuda", "xpu"):
+        backend = getattr(torch_module, name, None)
+        is_available = getattr(backend, "is_available", None)
+        if callable(is_available) and is_available():
+            return True
+    return False
+
+
 @dataclass(frozen=True)
 class AcceleratorCapabilities:
     kind: AcceleratorKind

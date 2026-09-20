@@ -24,6 +24,8 @@ from typing import TYPE_CHECKING, List, Protocol, Sequence, Tuple
 
 import torch
 import torch.nn.functional as F
+
+from freetoken.accelerator.runtime import supports_pinned_host_memory
 from freetoken.core import get_global_ctx
 from freetoken.layers import BaseOP, LinearReplicated
 from freetoken.mm import restore_placeholder
@@ -358,7 +360,7 @@ def build_ple_metadata(
         slots = fla.cache_indices.long()
         fresh = ~fla.has_initial_state
     else:  # direct-op callers (tests) with no scheduler metadata
-        pin = {"device": "cpu", "pin_memory": torch.cuda.is_available()}
+        pin = {"device": "cpu", "pin_memory": supports_pinned_host_memory()}
         cu = torch.tensor([0, *lens], dtype=torch.int64, **pin).cumsum_(0).to(device, non_blocking=True)
         slots = torch.tensor([_state_slot(r) for r in reqs], dtype=torch.int64, **pin).to(device, non_blocking=True)
         fresh = torch.tensor([r.cached_len == 0 for r in reqs], dtype=torch.bool, **pin).to(device, non_blocking=True)

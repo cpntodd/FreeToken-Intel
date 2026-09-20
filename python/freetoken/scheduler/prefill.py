@@ -5,6 +5,8 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, List, Tuple
 
 import torch
+
+from freetoken.accelerator.runtime import supports_pinned_host_memory
 from freetoken.core import Batch, Req
 from freetoken.utils import align_down, div_ceil, init_logger
 
@@ -25,7 +27,7 @@ logger = init_logger(__name__)
 
 def _maybe_pinned(t: torch.Tensor) -> torch.Tensor:
     """Pinning only buys the async H2D copy below; without a device it just raises."""
-    return t.pin_memory() if torch.cuda.is_available() else t
+    return t.pin_memory() if supports_pinned_host_memory() else t
 
 
 class ChunkedReq(Req):

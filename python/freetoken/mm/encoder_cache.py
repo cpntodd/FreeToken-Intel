@@ -7,6 +7,7 @@ from typing import Dict
 
 import torch
 
+from freetoken.accelerator.runtime import supports_pinned_host_memory
 from freetoken.utils import init_logger
 
 logger = init_logger(__name__)
@@ -44,7 +45,7 @@ class EncoderCache:
         if self._storage == "cpu":
             stored = torch.empty(
                 embedding.shape, dtype=embedding.dtype, device="cpu",
-                pin_memory=torch.cuda.is_available(),
+                pin_memory=supports_pinned_host_memory(),
             )
             stored.copy_(embedding, non_blocking=True)
         else:

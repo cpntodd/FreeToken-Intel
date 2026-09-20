@@ -7,6 +7,8 @@ from typing import TYPE_CHECKING, List
 
 import torch
 import torch.nn.functional as F
+
+from freetoken.accelerator.runtime import supports_pinned_host_memory
 from freetoken.distributed import get_tp_info
 from freetoken.layers import (
     BaseOP,
@@ -16,13 +18,13 @@ from freetoken.layers import (
     LinearRowParallel,
     OPList,
 )
-from freetoken.utils import div_even
-
 from freetoken.models.weight_stream import BlockWeightStreamer
+from freetoken.utils import div_even
 
 if TYPE_CHECKING:
     from freetoken.layers.quantization import QuantConfig
     from freetoken.message import MMItem
+
     from .config import VisionConfig
 
 
@@ -257,7 +259,9 @@ class Qwen3VLVisionModel(BaseOP):
 
     def _add_pos_embed(self, x: torch.Tensor, grid: torch.Tensor) -> None:
         """x += bilinear resample of the position table, in row chunks so the fp32 temporaries stay small."""
-        from transformers.vision_utils import get_vision_interpolation_indices_and_weights
+        from transformers.vision_utils import (
+            get_vision_interpolation_indices_and_weights,
+        )
 
         interp_idx, interp_w = get_vision_interpolation_indices_and_weights(
             grid,
@@ -340,7 +344,7 @@ class Qwen3VLVisionModel(BaseOP):
         rows = pixel_values.shape[0] // vc.spatial_merge_size**2
         groups = torch.empty(
             (1 + len(taps), rows, vc.out_hidden_size), dtype=self.pos_embed.weight.dtype, device="cpu",
-            pin_memory=torch.cuda.is_available(),
+            pin_memory=supports_pinned_host_memory(),
         )
         x = self._encode(pixel_values, grid_thw, groups)
         groups[0].copy_(self.merger.forward(x), non_blocking=True)
