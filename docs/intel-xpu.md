@@ -57,15 +57,16 @@ expanding the 27B model to BF16. The adapter preserves each source tensor's GGML
 supports the checkpoint's mixed K/IQ/Q8 formats, reverses llama.cpp's tiled GDN value-head
 storage at the FreeToken recurrence boundary, and omits the stored MTP layer. The
 `Qwen3.8-27B-UD-Q2_K_XL.gguf` checkpoint loads 9.47 GB of model state on the B580.
-The active serving layers now dispatch every quant format used by those layers to a direct
-packed SYCL matrix-vector kernel; the Q6_K tensors are confined to its omitted MTP
-layer. A public `LLM` run completed a 61-token prefill and returned token `The` (ID 760)
-on the Arc B580. That run took 41.78 s to load and 112.15 s for generation, with
-0.55 prompt tokens/s; generation timing includes prefill. The kernels establish
-correct packed execution, but one workgroup per token/output row is not an efficient
-batched-prefill strategy. Qwen remains an experimental correctness path until a tiled
-SYCL matrix kernel improves prompt throughput and identical-token parity is checked
-against a reference implementation.
+The active serving layers dispatch every quant format used by those layers to a direct
+packed SYCL kernel; the Q6_K tensors are confined to its omitted MTP layer. IQ1_S now
+uses a four-token tiled workgroup for batches of four or more, reusing each decoded
+weight across neighboring prompt tokens without a dense-weight temporary. On the Arc
+B580, that path improved the 61-token prompt rate from 0.55 to 0.88 tokens/s in the
+same public `LLM` benchmark and returned token `The` (ID 760) in both runs. The tiled
+run took 40.35 s to load and 68.92 s for generation; generation timing includes prefill.
+This is an experimental optimization of IQ1_S only: the other formats still use direct
+matvec kernels, and identical-token parity against a separate reference implementation
+has not yet been established.
 
 For a non-system Level Zero SDK, expose its header and loader paths through `CPATH` and
 `LIBRARY_PATH` before running Intel Triton for the first time. The runtime reports the
@@ -88,8 +89,9 @@ Q4_K, Q5_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS, and IQ4_XS. XP
 falling back to CPU. Synthetic FP32/BF16 device tests cover each format, real slices
 from the Qwen3.8 checkpoint match the FP32 dequantized reference, and the complete
 packed Qwen serving model has run through the public `LLM` API on the B580. These are
-single-token/small-batch matvec kernels; larger prefill batches still need a tiled
-matrix-multiply implementation.
+direct packed kernels, with the IQ1_S kernel also reusing decoded weights across four
+tokens for batches of four or more. The remaining formats still repeat weight reads for
+each token, so larger prefill batches need equivalent tiled kernels for those formats.
 
 Build the extension with an `icpx` compiler from the same oneAPI release as the SYCL
 runtime bundled by PyTorch. For the validated `torch==2.12.1+xpu` wheel, that is oneAPI

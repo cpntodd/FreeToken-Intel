@@ -271,7 +271,8 @@ def test_sycl_iq4_xs_matvec_matches_dequantized_reference(dtype):
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_sycl_iq1_s_matvec_matches_dequantized_reference(dtype):
+@pytest.mark.parametrize("batch", [3, 5])
+def test_sycl_iq1_s_matvec_matches_dequantized_reference(dtype, batch):
     from freetoken.layers.gguf import fused_mul_mat_gguf
     from freetoken.models.gguf.dequant import GGML_IQ1_S, dequantize
 
@@ -279,7 +280,7 @@ def test_sycl_iq1_s_matvec_matches_dequantized_reference(dtype):
     qweight = torch.randint(0, 256, (11, 100), dtype=torch.uint8, generator=generator)
     blocks = qweight.view(11, 2, 50)
     blocks[:, :, :2] = torch.tensor([0, 52], dtype=torch.uint8)
-    x_cpu = torch.randn(3, 512, dtype=dtype, generator=generator)
+    x_cpu = torch.randn(batch, 512, dtype=dtype, generator=generator)
     weight = dequantize(qweight, GGML_IQ1_S, torch.float32).reshape(11, 512)
     expected = (x_cpu.float() @ weight.T).to(dtype)
 
