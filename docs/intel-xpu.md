@@ -58,14 +58,14 @@ supports the checkpoint's mixed K/IQ/Q8 formats, reverses llama.cpp's tiled GDN 
 storage at the FreeToken recurrence boundary, and omits the stored MTP layer. The
 `Qwen3.8-27B-UD-Q2_K_XL.gguf` checkpoint loads 9.47 GB of model state on the B580.
 The active serving layers dispatch every quant format used by those layers to a direct
-packed SYCL kernel; the Q6_K tensors are confined to its omitted MTP layer. IQ1_S,
-IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, and IQ3_XXS use a four-token tiled workgroup for batches
-of four or more, reusing each decoded weight across neighboring prompt tokens without
-a dense-weight temporary. On the Arc B580, the same 61-token public `LLM` benchmark
-improved from 0.55 prompt tokens/s on the untiled path to 1.83 tokens/s with these six
-formats tiled (3.3x). Both runs returned token `The` (ID 760). The latest tiled run
-took 39.73 s to load and 33.37 s for generation; generation timing includes prefill.
-This remains experimental: the other formats still use direct matvec kernels, and
+packed SYCL kernel; Q6_K remains confined to its omitted MTP layer. All 13 quant
+formats used by active serving layers now select a four-token tiled workgroup for
+batches of four or more, reusing each decoded weight across prompt tokens without a
+dense-weight temporary; batches below four retain the direct path. On the Arc B580, the
+same 61-token public `LLM` benchmark improved from 0.55 prompt tokens/s on the untiled
+path to 1.81 tokens/s with all active quant formats tiled (3.3x). Both runs returned
+token `The` (ID 760). The latest tiled run took 39.16 s to load and 33.62 s for
+generation; generation timing includes prefill. This remains experimental, and
 identical-token parity against a separate reference implementation has not yet been
 established.
 
@@ -89,11 +89,9 @@ Q4_K, Q5_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS, and IQ4_XS. XP
 `GGUFLinear` dispatches these formats without materializing a full dense weight or
 falling back to CPU. Synthetic FP32/BF16 device tests cover each format, real slices
 from the Qwen3.8 checkpoint match the FP32 dequantized reference, and the complete
-packed Qwen serving model has run through the public `LLM` API on the B580. These are
-direct packed kernels, with IQ1_S, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, and IQ3_XXS also
-reusing decoded weights across four tokens for batches of four or more. The remaining
-formats still repeat weight reads for each token, so larger prefill batches need
-equivalent tiled kernels for those formats.
+packed Qwen serving model has run through the public `LLM` API on the B580. Every
+active-serving format has both a direct small-batch path and a four-token tiled path
+for batches of four or more. Q6_K is present only in the omitted MTP layer.
 
 Build the extension with an `icpx` compiler from the same oneAPI release as the SYCL
 runtime bundled by PyTorch. For the validated `torch==2.12.1+xpu` wheel, that is oneAPI
