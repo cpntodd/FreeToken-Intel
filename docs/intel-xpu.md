@@ -89,6 +89,12 @@ The 35-token prompt ran at 10.29 tokens/s and produced `Hello!` (token IDs 9906,
 load took 21.48 s and generation took 3.50 s including prefill. This is a short
 functional run, not a packed-quantized performance result.
 
+After registering GGUF USER_DEFINED tokens as special tokens, a repeat 35-token
+smoke on the same B580 produced `Hello!` (token IDs 9906, 0); load took 22.68 s,
+TTFT was 3.67 s, and the one decode interval took 0.055 s (18.05 decode tokens/s).
+This confirms the shared tokenizer fix did not regress this path; it is not a
+steady-state performance comparison.
+
 The revised timer was exercised on the same B580 with:
 
 ```bash
@@ -114,21 +120,28 @@ packed SYCL kernel; Q6_K remains confined to its omitted MTP layer. All 13 quant
 formats used by active serving layers now select a four-token tiled workgroup for
 batches of four or more, reusing each decoded weight across prompt tokens without a
 dense-weight temporary; batches below four retain the direct path. On the Arc B580, the
-same 61-token public `LLM` benchmark improved from 0.55 prompt tokens/s on the untiled
+historical 61-token public `LLM` benchmark improved from 0.55 prompt tokens/s on the untiled
 path to 1.81 tokens/s with all active quant formats tiled (3.3x). Both runs returned
 token `The` (ID 760). The latest tiled run took 39.16 s to load and 33.62 s for
-generation; generation timing includes prefill. This remains experimental, and
-identical-token parity against a separate reference implementation has not yet been
-established.
+generation; generation timing includes prefill. This remains experimental. The
+identical-token parity warning referred to the pre-fix, 61-token prompt. After
+registering GGUF USER_DEFINED tokens as special, the exact 59-token prompt matches
+Prism `/tokenize`. FreeToken emitted IDs `760, 1156, 6587` (`The user wants`) on the
+B580; load took 47.89 s, TTFT was 36.52 s, and two decode intervals measured 0.997
+tokens/s. Prism Vulkan generated the same short text from the exact prompt. This is
+prompt-token parity and short text-level agreement, not logits parity or a general
+model-quality result.
 
-The same public XPU path also completed a forced-length smoke for the local
-`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` checkpoint on this B580. With the standard
-61-token prompt, context 128, and a 256-token KV cache, it loaded in 48.85 s, prefilled
-at 1.53 tokens/s, and emitted the token IDs `760, 1156, 6587` (`The user wants`). The
-two inter-token intervals measured 0.794 decode tokens/s. This is one constrained
-functional sample, not a Q2_K comparison or a steady-state performance claim. During
-the live run, `nvtop` identified Battlemage G21 / Arc B580, showed 99% memory use and a
-1.63 GHz GPU clock; its utilization field was unavailable.
+The same public XPU path completed a forced-length smoke for the local
+`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` checkpoint on this B580. Its earlier 61-token
+sample (48.85 s load, 1.53 prompt tokens/s, and 0.794 decode tokens/s) used the
+pre-fix prompt and is not comparable to the corrected run. After the tokenizer fix,
+the exact 59-token prompt matched Prism `/tokenize`; with context 128 and a 256-token
+KV cache, FreeToken emitted IDs `1596, 1144, 4087` (`We need answer`). Load took
+47.67 s, TTFT was 41.71 s, and two decode intervals measured 0.829 tokens/s. Prism
+Vulkan generated the same short text from the exact prompt. This is one constrained
+functional sample and a text-level comparison, not logits parity, MTP validation, or
+a steady-state performance claim.
 
 For a non-system Level Zero SDK, expose its header and loader paths through `CPATH` and
 `LIBRARY_PATH` before running Intel Triton for the first time. The runtime reports the
