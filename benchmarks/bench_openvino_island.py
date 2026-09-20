@@ -19,11 +19,18 @@ def main() -> None:
     parser.add_argument("--output-size", type=int, default=4096)
     parser.add_argument("--iterations", type=int, default=20)
     parser.add_argument("--source", choices=("cpu", "xpu"), default="xpu")
+    parser.add_argument("--fallback", choices=("none", "xpu"), default="none")
     args = parser.parse_args()
+    if args.fallback == "xpu" and args.source != "xpu":
+        parser.error("--fallback xpu requires --source xpu")
 
     weight = torch.randn(args.output_size, args.hidden_size, dtype=torch.float16)
     island = OpenVINODenseIsland(
-        weight, max_batch_tokens=args.tokens, activation="silu", device="GPU"
+        weight,
+        max_batch_tokens=args.tokens,
+        activation="silu",
+        device="GPU",
+        fallback=args.fallback,
     )
     source_device = torch.device(args.source)
     hidden_states = torch.randn(
@@ -60,6 +67,7 @@ def main() -> None:
     input_copy_samples = []
     inference_samples = []
     output_copy_samples = []
+    backend_counts = {"openvino": 0, "xpu": 0}
     openvino_result = None
     for _ in range(args.iterations):
         sync_source()
@@ -70,6 +78,7 @@ def main() -> None:
         input_copy_samples.append(openvino_result.input_copy_seconds * 1000)
         inference_samples.append(openvino_result.inference_seconds * 1000)
         output_copy_samples.append(openvino_result.output_copy_seconds * 1000)
+        backend_counts[openvino_result.backend] += 1
 
     assert openvino_result is not None
     openvino_ms = statistics.median(openvino_samples)
@@ -79,17 +88,28 @@ def main() -> None:
     print(
         json.dumps(
             {
-                "requested_device": island.execution_info.requested_device,
-                "execution_devices": island.execution_info.execution_devices,
-                "full_device_name": island.execution_info.full_device_name,
+                "requested_device": island.device,
+                "execution_devices": (
+                    None
+                    if island.execution_info is None
+                    else island.execution_info.execution_devices
+                ),
+                "full_device_name": (
+                    None
+                    if island.execution_info is None
+                    else island.execution_info.full_device_name
+                ),
                 "source_device": args.source,
+                "backend_used": openvino_result.backend,
+                "backend_counts": backend_counts,
+                "fallback_reason": openvino_result.fallback_reason,
                 "tokens": args.tokens,
                 "hidden_size": args.hidden_size,
                 "output_size": args.output_size,
                 "iterations": args.iterations,
-                "median_openvino_pipeline_ms": openvino_ms,
+                "median_island_pipeline_ms": openvino_ms,
                 "median_source_eager_ms": source_eager_ms,
-                "openvino_to_source_eager_ratio": openvino_ms / source_eager_ms,
+                "island_to_source_eager_ratio": openvino_ms / source_eager_ms,
                 "output_max_abs_error": (openvino_output - eager_output)
                 .abs()
                 .max()

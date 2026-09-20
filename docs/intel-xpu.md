@@ -189,6 +189,11 @@ provider. `OpenVINODenseIsland` compiles only for an explicit OpenVINO `GPU` dev
 checks the compiled model's `EXECUTION_DEVICES`, and rejects CPU participation. Its
 current bridge stages tensors through host FP16 memory; each invocation reports input,
 inference, and output-copy timings so this cost cannot be mistaken for zero-copy USM.
+By default, OpenVINO import, GPU compilation, and inference failures raise to the caller.
+Callers may explicitly pass `fallback="xpu"` to run the same bounded projection and
+activation with PyTorch on XPU when one of those OpenVINO steps fails. The fallback
+requires XPU input and an available XPU device; every result identifies its actual
+`backend` and includes a `fallback_reason` when XPU was used.
 
 Run its B580 benchmark with:
 
@@ -196,6 +201,11 @@ Run its B580 benchmark with:
 PYTHONPATH=python .venv/bin/python benchmarks/bench_openvino_island.py \
   --source xpu --tokens 32 --hidden-size 1024 --output-size 4096
 ```
+
+To measure the opt-in fallback path after an OpenVINO failure, add `--fallback xpu`.
+The benchmark requires `--source xpu` for that policy and reports the actual backend,
+fallback reason, and backend counts rather than labeling XPU fallback timings as
+OpenVINO timings.
 
 The benchmark compares the complete OpenVINO path, including host staging, with
 source-device eager execution and checks output parity. On the B580, a 32-token
