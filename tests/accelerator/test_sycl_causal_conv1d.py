@@ -59,3 +59,23 @@ def test_sycl_q8_0_matvec_matches_dequantized_reference(dtype):
 
     tolerance = 1e-5 if dtype == torch.float32 else 5e-2
     torch.testing.assert_close(actual.cpu(), expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+def test_sycl_q4_k_matvec_matches_dequantized_reference(dtype):
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_Q4_K, dequantize
+
+    generator = torch.Generator().manual_seed(31)
+    qweight = torch.randint(0, 256, (11, 288), dtype=torch.uint8, generator=generator)
+    qweight[:, :2] = torch.tensor([0, 52], dtype=torch.uint8)
+    qweight[:, 2:4] = torch.tensor([0, 48], dtype=torch.uint8)
+    x_cpu = torch.randn(3, 512, dtype=dtype, generator=generator)
+    expected = x_cpu @ dequantize(qweight, GGML_Q4_K, dtype).reshape(11, 512).T
+
+    actual = fused_mul_mat_gguf(x_cpu.to("xpu"), qweight.to("xpu"), GGML_Q4_K)
+    torch.xpu.synchronize()
+
+    tolerance = 1e-5 if dtype == torch.float32 else 8e-2
+    torch.testing.assert_close(actual.cpu(), expected, rtol=tolerance, atol=tolerance)
