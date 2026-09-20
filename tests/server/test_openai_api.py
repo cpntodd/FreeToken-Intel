@@ -4,8 +4,8 @@ import asyncio
 import json
 from types import SimpleNamespace
 
+import httpx
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 from freetoken.message import TokenizeMsg, UserReply
 from freetoken.server.openai_api import (
     ChatCompletionRequest,
@@ -20,6 +20,13 @@ from freetoken.server.openai_api import (
 
 def run(coro):
     return asyncio.run(coro)
+
+
+async def _get(app: FastAPI, path: str) -> httpx.Response:
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app), base_url="http://test"
+    ) as client:
+        return await client.get(path)
 
 
 class FakeState:
@@ -433,7 +440,7 @@ def test_models_route_returns_served_model_name():
     app = FastAPI()
     register_openai_routes(app, lambda: state, lambda: {})
 
-    response = TestClient(app).get("/v1/models")
+    response = run(_get(app, "/v1/models"))
 
     assert response.status_code == 200
     card = response.json()["data"][0]
@@ -449,7 +456,7 @@ def test_models_route_publishes_the_model_context_length():
     app = FastAPI()
     register_openai_routes(app, lambda: state, lambda: {})
 
-    card = TestClient(app).get("/v1/models").json()["data"][0]
+    card = run(_get(app, "/v1/models")).json()["data"][0]
 
     assert card["max_model_len"] == 262144
     assert card["context_length"] == 262144
