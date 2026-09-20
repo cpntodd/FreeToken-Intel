@@ -55,6 +55,16 @@ rate excludes the first token and is null when fewer than two tokens are emitted
 kernel setup on the first request is included, so treat a single cold run as diagnostic
 rather than a steady-state performance result.
 
+On 2026-09-20, the updated harness ran
+`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` on the B580 and reported
+`execution_device: xpu:0`, device ID `0xE20B`, and Level-Zero V2. The 20-token prompt
+reached first token in 19.88 s; 14 measured decode intervals took 4.25 s (3.29 tokens/s),
+and the 15 returned tokens measured 0.62 end-to-end tokens/s. Model load took 46.14 s.
+The forced-length sample repeated control tokens, so these numbers validate the live
+execution path and timer, not response quality or steady-state speed. During the run,
+`nvtop` identified Battlemage G21 / Arc B580 and showed 34% memory use at 2.15 GHz; its
+GPU-utilisation field was unavailable.
+
 Use `--max-tokens 64 --force-decode-length` for a longer decode sample. That option
 ignores EOS until the token limit and is intended for measurement, not normal generation.
 The earlier one-token B580 smoke timing used the old whole-generation timer and is not
