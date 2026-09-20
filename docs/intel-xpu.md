@@ -44,13 +44,17 @@ PYTHONPATH=python \
   /home/oddsoul/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf
 ```
 
-On 2026-09-20, the host Arc B580 completed a short public `LLM` API smoke test with
-`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf`. The runtime identified PCI device `0xE20B`,
-driver `1.6.33578+15`, and Intel oneAPI Unified Runtime over Level-Zero V2. A 20-token
-prompt ran at 2.71 tokens/s and produced token ID 9259 (`Hello`); model load took
-41.57 s, and generation took 7.43 s including prefill. This confirms end-to-end
-execution on the intended GPU, but the one-token result is only a functional smoke
-test, not a performance baseline.
+The benchmark JSON reports time-to-first-token, decode tokens/s measured from
+inter-token timestamps, and end-to-end output tokens/s separately. TTFT starts after
+prompt tokenization and includes the first request's scheduler and runtime work; decode
+rate excludes the first token and is null when fewer than two tokens are emitted. Lazy
+kernel setup on the first request is included, so treat a single cold run as diagnostic
+rather than a steady-state performance result.
+
+Use `--max-tokens 64 --force-decode-length` for a longer decode sample. That option
+ignores EOS until the token limit and is intended for measurement, not normal generation.
+The earlier one-token B580 smoke timing used the old whole-generation timer and is not
+comparable to the separate decode metric.
 
 The same benchmark also covers Llama 3 GGUF checkpoints. The validated
 `Llama-3.2-1B-Instruct-Q4_K_M.gguf` path reconstructs the checkpoint's Llama 3 RoPE
@@ -65,6 +69,21 @@ public `LLM` API on the B580 (PCI `0xE20B`, driver `1.6.33578+15`, Level-Zero V2
 The 35-token prompt ran at 10.29 tokens/s and produced `Hello!` (token IDs 9906, 0);
 load took 21.48 s and generation took 3.50 s including prefill. This is a short
 functional run, not a packed-quantized performance result.
+
+The revised timer was exercised on the same B580 with:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
+  .venv/bin/python benchmarks/bench_xpu_gemma4.py \
+  /home/oddsoul/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --max-tokens 32 --force-decode-length --context 128 --kv-tokens 256
+```
+
+The cold run loaded in 23.15 s and reported 5.04 s to first token, 30 decode tokens over
+1.52 s (19.77 decode tokens/s), and 4.73 end-to-end output tokens/s across 31 returned
+tokens; the terminal EOS is omitted from the returned list. EOS was ignored to hold the
+decode sample length, producing repeated chat/control tokens, so this validates timing
+instrumentation only, not output quality or steady-state performance.
 
 Dense Qwen3.8 GGUF checkpoints use a memory-feasible native packed path rather than
 expanding the 27B model to BF16. The adapter preserves each source tensor's GGML type,
@@ -223,10 +242,12 @@ FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
   --max-tokens 4 --context 128 --kv-tokens 256
 ```
 
-The smoke run loaded the model in 38.59 s and generated 3 tokens in 21.43 s. This is
-functional evidence, not a throughput baseline: the short response ended early and the
-benchmark's generation timer includes prompt prefill. Do not use its reported average as
-decode tokens/s.
+The historical smoke run loaded the model in 38.59 s and generated 3 tokens in 21.43 s.
+It used the earlier whole-generation timer, which included prompt prefill; the updated
+benchmark reports TTFT and inter-token decode rate separately. This short run remains
+functional evidence, not a throughput baseline. For a longer measurement, use
+`--max-tokens 64 --force-decode-length`; the first request is cold and should not be
+treated as a steady-state result.
 
 Bonsai 2 additionally declares a block-1024 normalized Walsh-Hadamard transform,
 explicit signs, and grouped GDN values. Registering type 142 alone does not establish
