@@ -310,10 +310,9 @@ batching, and measurements that include all transfer and synchronization costs.
 ## Bonsai PQ2_0 compatibility
 
 The local `Ternary-Bonsai-27B-PQ2_0.gguf` and
-`Ternary-Bonsai-2-27B-PQ2_0.gguf` files both declare `qwen35`, but the current
-`gguf-py` reader rejects their private tensor type 142 before FreeToken reaches model
-construction or GPU execution. It must not be treated as upstream Q2_0: PQ2_0 uses
-group size 128 (34 bytes per block), while upstream Q2_0 is group size 64. The
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` files both declare `qwen35`, and both use private
+type 142 rather than upstream Q2_0. PQ2_0 uses group size 128 (34 bytes per block),
+while upstream Q2_0 is group size 64. The
 [Prism block definition](https://github.com/PrismML-Eng/llama.cpp/blob/prism/ggml/src/ggml-common.h#L2460-L2475)
 and [upstream tracking issue](https://github.com/ggml-org/llama.cpp/issues/29058)
 describe the distinction.
@@ -354,5 +353,7 @@ execution and separate timing, but it is not a steady-state benchmark.
 Bonsai 2 additionally declares a block-1024 normalized Walsh-Hadamard transform,
 explicit signs, and grouped GDN values. Registering type 142 alone does not establish
 Bonsai 2 correctness; it remains unsupported until its model-transform handling has
-reference parity. The loader rejects its unsupported transform metadata rather than
+reference parity. A B580 smoke of `Ternary-Bonsai-2-27B-PQ2_0.gguf` on 2026-09-20
+reached this rejection before model allocation or GPU work: `Prism Hadamard-transformed
+GGUF weights are not supported`. The loader rejects this transform metadata rather than
 silently interpreting it as the classic Bonsai format.
