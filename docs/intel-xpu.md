@@ -249,6 +249,13 @@ functional evidence, not a throughput baseline. For a longer measurement, use
 `--max-tokens 64 --force-decode-length`; the first request is cold and should not be
 treated as a steady-state result.
 
+The revised benchmark also completed a 16-token forced-length run of this checkpoint on
+the host B580 (PCI `0xE20B`, driver `1.6.33578+15`, Level-Zero V2). With 19 prompt tokens,
+load took 39.54 s, TTFT was 21.57 s, and 14 decode tokens arrived over 5.77 s (2.43
+tokens/s); end-to-end output rate was 0.55 tokens/s over 15 returned tokens. The terminal
+EOS is omitted from the returned list. This single cold sample confirms longer XPU
+execution and separate timing, but it is not a steady-state benchmark.
+
 Bonsai 2 additionally declares a block-1024 normalized Walsh-Hadamard transform,
 explicit signs, and grouped GDN values. Registering type 142 alone does not establish
 Bonsai 2 correctness; it remains unsupported until its model-transform handling has
