@@ -355,9 +355,20 @@ live PyTorch XPU `data_ptr()` and `SHARED_MEM_TYPE=USM_USER_BUFFER`. Python inte
 `ctypes.c_void_p`, and NumPy pointer scalars were all rejected before tensor creation;
 the binding does not expose a safe raw-pointer conversion. In addition, OpenVINO's
 default GPU context reports `CONTEXT_TYPE=OCL`, while PyTorch XPU normally submits via
-oneAPI/Level Zero. A zero-copy bridge therefore belongs in a C++ extension that can
-validate native context compatibility, retain the PyTorch allocation, and synchronize
-both queues. Passing an integer device address through Python is not a supported path.
+oneAPI/Level Zero. Current OpenVINO documentation describes the GPU plugin as
+OpenCL-based and exposes its GPU remote context as `ClContext`. The current upstream
+GPU-plugin source rejects shared `ContextType::ZE` contexts and marks shared remote
+contexts unsupported with the SYCL runtime. A C++ extension does not by itself make a
+direct PyTorch Level-Zero allocation importable by OpenVINO's GPU plugin; passing an
+integer device address through Python is not a supported path. OpenVINO documents
+external shared-memory handles, including DMA-BUF on Linux, but this probe has not
+established a supported way to export a PyTorch XPU allocation to such a handle or to
+validate its lifetime and synchronization. Keep the host-staged path until one of
+those interop routes is demonstrated end to end.
+
+References: [OpenVINO GPU device documentation](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html),
+[GPU Remote Tensor API](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device/remote-tensor-api-gpu-plugin.html),
+and [upstream GPU remote-context implementation](https://github.com/openvinotoolkit/openvino/blob/master/src/plugins/intel_gpu/src/plugin/remote_context.cpp).
 
 `experiments/probe_openvino_usm.py` is an isolated C++/Python probe for that boundary.
 It compiles a GPU-only OpenVINO multiply model, tries to wrap a live PyTorch XPU tensor
