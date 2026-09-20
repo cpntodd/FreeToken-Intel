@@ -6,7 +6,6 @@ import time
 from dataclasses import asdict
 
 import torch
-from freetoken.accelerator import resolve_runtime
 from freetoken.accelerator.timing import summarize_generation_timing
 from freetoken.core import SamplingParams
 from freetoken.llm import LLM
@@ -26,6 +25,17 @@ class _TimedLLM(LLM):
             ):
                 self.token_timestamps.append(time.perf_counter())
         super().offline_send_result(reply)
+
+
+def _xpu_execution_capabilities(llm):
+    """Return capability evidence from the runtime that actually built the model."""
+    engine = llm.engine
+    if engine.runtime.kind != "xpu" or engine.device.type != "xpu":
+        raise RuntimeError(
+            "XPU benchmark engine did not bind an XPU device; refusing to report timings"
+        )
+    index = 0 if engine.device.index is None else engine.device.index
+    return engine.runtime.capabilities(index)
 
 
 def main() -> None:
@@ -55,7 +65,7 @@ def main() -> None:
         mm=MultimodalConfig(disabled_encoders=frozenset(ENCODER_KINDS)),
     )
     load_seconds = time.perf_counter() - started
-    capabilities = resolve_runtime("xpu").capabilities(0)
+    capabilities = _xpu_execution_capabilities(llm)
     encoded = llm.tokenizer.apply_chat_template(
         [{"role": "user", "content": args.prompt}],
         tokenize=True,
@@ -81,6 +91,7 @@ def main() -> None:
         json.dumps(
             {
                 "accelerator": capabilities.kind,
+                "execution_device": capabilities.device,
                 "device": capabilities.name,
                 "device_id": capabilities.device_id,
                 "driver": capabilities.driver_version,
