@@ -43,6 +43,21 @@ The B580 is the current development and hardware-validation target. Results in
 the Intel guide are functional or benchmark evidence for the listed workload
 and configuration; they should not be treated as general performance claims.
 
+## Current B580 benchmark snapshot
+
+Recorded B580 results as of 2026-09-20 are summarized below. These runs use
+different models and measurement modes, so compare results only within the same
+row. Full commands, settings, and caveats are in
+[docs/intel-xpu.md](docs/intel-xpu.md).
+
+| Model or backend | Recorded result | What it demonstrates |
+| --- | --- | --- |
+| Llama 3.2 1B Instruct Q4_K_M | 5.04 s TTFT; 19.77 decode tokens/s; 4.73 end-to-end output tokens/s; 23.15 s model load | Cold forced-decode timing run; 31 returned tokens (terminal EOS omitted). This validates timing instrumentation, not output quality or steady-state speed. |
+| Qwen3.8 27B UD Q2_K_XL | 1.81 prompt tokens/s with tiled SYCL, up from 0.55 (3.3x); 9.47 GB model state | 61-token benchmark; generation took 33.62 s including prefill. Experimental packed path; reference parity is still pending. |
+| Ternary-Bonsai 27B PQ2_0 | 38.59 s model load; 3 generated tokens in 21.43 s | Historical functional smoke only. The older generation timer includes prefill, so this is not a throughput result. |
+| OpenVINO dense projection | 2.21 ms vs 0.33 ms for eager XPU (6.6x slower); max absolute error 0.0078125 | 32-token, 5120-to-10240 projection using host staging; prototype measurement, not a general backend comparison. |
+| Vulkan | No model throughput result recorded | Isolated Intel-GPU FP32 correctness probe; not integrated into model serving. |
+
 ## Repository layout
 
 - `python/freetoken/` - inference engine, model support, scheduler, caches,
