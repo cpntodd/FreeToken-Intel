@@ -566,6 +566,14 @@ way to create Torch XPU allocations with that export property or to validate han
 lifetime and synchronization. Keep the host-staged path until an interop route is
 demonstrated end to end.
 
+The upstream PyTorch XPU caching allocator's ordinary allocation path calls
+`sycl::aligned_alloc_device` with the selected device and PyTorch's SYCL device context
+([allocator source](https://github.com/pytorch/pytorch/blob/main/c10/xpu/XPUCachingAllocator.cpp)).
+Therefore, a tensor's `data_ptr()` alone does not establish that its allocation belongs
+to OpenVINO's OpenCL context or can be imported there. This source-level detail is a
+reason to require the exact installed-runtime probe below; it is not a substitute for
+that runtime evidence.
+
 References: [OpenVINO GPU device documentation](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html),
 [GPU Remote Tensor API](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device/remote-tensor-api-gpu-plugin.html),
 [upstream GPU remote-context implementation](https://github.com/openvinotoolkit/openvino/blob/master/src/plugins/intel_gpu/src/plugin/remote_context.cpp),
