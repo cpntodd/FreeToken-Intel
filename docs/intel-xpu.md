@@ -16,24 +16,28 @@ PyTorch `2.14.0+xpu` was also tested on this host. It enumerated the B580 but ab
 inside Intel's command encoder on its first submitted kernel, so it is not a supported
 combination yet.
 
-Install the XPU wheels before installing FreeToken. Do not install the NVIDIA `triton`
+Install the XPU wheels before building FreeToken. Do not install the NVIDIA `triton`
 wheel into the same environment as `triton-xpu`; both own the `triton` Python package.
-`flashlib` is presently installed without dependencies to avoid replacing Intel Triton.
+The `xpu` extra deliberately excludes CUDA-only `flashlib`, CUDA Torch, and NVIDIA
+Triton. The build is run without isolation so the native extension links against the
+already-installed XPU Torch rather than a build-isolation CUDA Torch.
 
 ```bash
 uv venv --python 3.12 .venv
-uv pip install --python .venv/bin/python \
-  --index-url https://download.pytorch.org/whl/xpu \
-  torch==2.12.1+xpu triton-xpu==3.7.1
-uv pip install --python .venv/bin/python --no-deps flashlib==0.3.0
+# Install the matching oneAPI 2025.3 DPC++ compiler from Intel's package repository first.
+export ONEAPI_ROOT=/opt/intel/oneapi
+export FREETOKEN_SYCL_COMPILER_VERSION=2025.3
+export CXX="$ONEAPI_ROOT/compiler/2025.3/bin/icpx"
 sudo apt-get install libze-dev
-FREETOKEN_ACCELERATOR=xpu uv pip install --python .venv/bin/python -e . --no-deps
+FREETOKEN_ACCELERATOR=xpu uv pip install --python .venv/bin/python \
+  --torch-backend xpu --no-sources --no-build-isolation -e ".[xpu]"
 ```
 
-Install the remaining accelerator-neutral dependencies from `pyproject.toml`, excluding
-the CUDA `torch`, `torchvision`, and `triton` entries. A future packaging milestone will
-publish separate resolved CUDA and XPU dependency sets; until then, `--no-deps` is
-required for the editable XPU install.
+`--torch-backend xpu` resolves `torch==2.12.1+xpu` and its matching `triton-xpu` from
+PyTorch's XPU index. `--no-sources` prevents the repository's CUDA-specific uv source
+pin from overriding that selection. CUDA users install `freetoken[cuda]` (or the
+existing full-path alias `freetoken[accel]`); these profiles must not be combined in one
+environment.
 
 Run the hardware benchmark with a supported local GGUF:
 
