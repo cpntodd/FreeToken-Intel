@@ -102,6 +102,15 @@ generation; generation timing includes prefill. This remains experimental, and
 identical-token parity against a separate reference implementation has not yet been
 established.
 
+The same public XPU path also completed a forced-length smoke for the local
+`Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` checkpoint on this B580. With the standard
+61-token prompt, context 128, and a 256-token KV cache, it loaded in 48.85 s, prefilled
+at 1.53 tokens/s, and emitted the token IDs `760, 1156, 6587` (`The user wants`). The
+two inter-token intervals measured 0.794 decode tokens/s. This is one constrained
+functional sample, not a Q2_K comparison or a steady-state performance claim. During
+the live run, `nvtop` identified Battlemage G21 / Arc B580, showed 99% memory use and a
+1.63 GHz GPU clock; its utilization field was unavailable.
+
 For a non-system Level Zero SDK, expose its header and loader paths through `CPATH` and
 `LIBRARY_PATH` before running Intel Triton for the first time. The runtime reports the
 selected device, PCI ID, driver, and Level Zero platform in the benchmark JSON.
