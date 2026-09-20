@@ -91,6 +91,13 @@ Current constraints are explicit: one XPU only, eager execution only, and the po
 `torch` attention backend for FULL/SWA models. CUDA graphs, CUDA device identifiers, and
 tensor parallel XPU launches are rejected rather than silently falling back.
 
+## Device capability report
+
+Run `ft devices` to list CUDA and XPU devices, memory, driver/platform identifiers, and
+runtime features such as streams, events, and graph capture. Use `ft devices --json` for
+machine-readable output. If no accelerator is found, the command reports that directly;
+it does not select a CPU inference fallback.
+
 ## Native SYCL kernels
 
 The XPU build includes a native SYCL extension for the causal depthwise convolution

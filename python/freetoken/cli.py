@@ -17,6 +17,7 @@ Commands:
   launch      Configure and launch an agent against a FreeToken server
   checkpoint  Convert an HF safetensors checkpoint to FTW
   bench       Run a micro-benchmark (e.g. "bench bw" = CPU vs PCIe bandwidth)
+  devices     Report detected CUDA and XPU device capabilities
 
 Use "ft <command> --help" for command-specific options.
 Use "ft --version" to print the FreeToken version.""",
@@ -61,6 +62,55 @@ def _run_daemon(argv: list[str]) -> int:
     return main(argv, prog="ft daemon")
 
 
+def _print_devices_help(file: TextIO) -> None:
+    print(
+        """usage: ft devices [--json]
+
+List detected CUDA and XPU devices and their runtime capabilities.
+Use --json for machine-readable output.""",
+        file=file,
+    )
+
+
+def _run_devices(argv: list[str]) -> int:
+    if argv in (["-h"], ["--help"]):
+        _print_devices_help(sys.stdout)
+        return 0
+    if argv not in ([], ["--json"]):
+        print("ft devices accepts only --json or --help.", file=sys.stderr)
+        _print_devices_help(sys.stderr)
+        return 2
+
+    import json
+    from dataclasses import asdict
+
+    from freetoken.accelerator import discover_accelerators
+
+    devices = discover_accelerators()
+    if argv == ["--json"]:
+        records = [
+            asdict(capability) | {"device": capability.device} for capability in devices
+        ]
+        print(json.dumps(records, indent=2, sort_keys=True))
+        return 0
+
+    if not devices:
+        print("No CUDA or XPU accelerator devices detected.")
+        return 0
+
+    for capability in devices:
+        memory_gib = capability.total_memory / (1024**3)
+        print(f"{capability.device} | {capability.name} | {memory_gib:.1f} GiB")
+        print(f"  Device ID: {capability.device_id or 'unavailable'}")
+        print(f"  UUID: {capability.uuid or 'unavailable'}")
+        print(f"  Driver: {capability.driver_version or 'unavailable'}")
+        print(f"  Platform: {capability.platform_name or 'unavailable'}")
+        print(f"  Streams: {'yes' if capability.streams else 'no'}")
+        print(f"  Events: {'yes' if capability.events else 'no'}")
+        print(f"  Graph capture: {'yes' if capability.graph_capture else 'no'}")
+    return 0
+
+
 def _print_bench_help(file: TextIO) -> None:
     print(
         """usage: ft bench <subcommand> [args]
@@ -98,6 +148,7 @@ COMMANDS = {
     "launch": "_run_launch",
     "checkpoint": "_run_checkpoint",
     "bench": "_run_bench",
+    "devices": "_run_devices",
 }
 
 
