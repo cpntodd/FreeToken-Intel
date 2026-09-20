@@ -27,6 +27,7 @@ from freetoken.models.gguf.dequant import (
     GGML_IQ2_XXS,
     GGML_IQ3_S,
     GGML_IQ3_XXS,
+    GGML_IQ4_NL,
     GGML_IQ4_XS,
     GGML_NAME,
     GGML_PQ2_0,
@@ -77,6 +78,7 @@ def fused_mul_mat_gguf(
             iq2_xxs_matvec_sycl,
             iq3_s_matvec_sycl,
             iq3_xxs_matvec_sycl,
+            iq4_nl_matvec_sycl,
             iq4_xs_matvec_sycl,
             pq2_0_matvec_sycl,
             q2_k_matvec_sycl,
@@ -96,6 +98,8 @@ def fused_mul_mat_gguf(
             return q4_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q4_1 and x.shape[0] == 1:
             return q4_1_matvec_sycl(x, qweight)
+        if qweight_type == GGML_IQ4_NL and x.shape[0] == 1:
+            return iq4_nl_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q5_0 and x.shape[0] == 1:
             return q5_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q5_1 and x.shape[0] == 1:
@@ -318,7 +322,9 @@ class GGUFMergedLinear(BaseOP):
         hadamard_config=None,
         hadamard_weight_names: list[str] | None = None,
     ):
-        if hadamard_weight_names is not None and len(hadamard_weight_names) != len(parts):
+        if hadamard_weight_names is not None and len(hadamard_weight_names) != len(
+            parts
+        ):
             raise ValueError("Hadamard weight names must match merged projection parts")
         self.parts = OPList(
             [

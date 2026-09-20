@@ -267,6 +267,87 @@ def test_fused_mul_mat_gguf_keeps_q4_1_prefill_on_xpu_matmul(monkeypatch):
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("batch", [1, 3, 5])
+def test_sycl_iq4_nl_matvec_matches_dequantized_reference(dtype, batch):
+    from freetoken.kernel.sycl.causal_conv1d import iq4_nl_matvec_sycl
+    from freetoken.models.gguf.dequant import GGML_IQ4_NL, dequantize
+
+    generator = torch.Generator().manual_seed(127)
+    qweight = torch.randint(0, 256, (11, 54), dtype=torch.uint8, generator=generator)
+    qweight.view(11, 3, 18)[:, :, :2] = torch.tensor([0, 56], dtype=torch.uint8)
+    x_cpu = torch.randn(batch, 96, dtype=dtype, generator=generator)
+    weight = dequantize(qweight, GGML_IQ4_NL, torch.float32).reshape(11, 96)
+    expected = (x_cpu.float() @ weight.T).to(dtype)
+
+    actual = iq4_nl_matvec_sycl(x_cpu.to("xpu"), qweight.to("xpu"))
+    torch.xpu.synchronize()
+
+    tolerance = 5e-5 if dtype == torch.float32 else 6e-2
+    torch.testing.assert_close(actual.cpu(), expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_sycl_iq4_nl_matvec_rejects_invalid_geometry():
+    from freetoken.kernel.sycl.causal_conv1d import iq4_nl_matvec_sycl
+
+    x = torch.randn(1, 64, device="xpu")
+    qweight = torch.empty((2, 35), dtype=torch.uint8, device="xpu")
+    with pytest.raises(RuntimeError, match="invalid IQ4_NL row geometry"):
+        iq4_nl_matvec_sycl(x, qweight)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_fused_mul_mat_gguf_dispatches_single_token_iq4_nl_to_sycl(monkeypatch):
+    from freetoken.kernel.sycl import causal_conv1d
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_IQ4_NL
+
+    x = torch.empty((1, 32), device="xpu")
+    qweight = torch.empty((2, 18), dtype=torch.uint8, device="xpu")
+    expected = torch.empty((1, 2), device="xpu")
+    calls = []
+
+    def dispatch(actual_x, actual_qweight):
+        calls.append((actual_x, actual_qweight))
+        return expected
+
+    monkeypatch.setattr(causal_conv1d, "iq4_nl_matvec_sycl", dispatch)
+    actual = fused_mul_mat_gguf(x, qweight, GGML_IQ4_NL)
+
+    assert actual is expected
+    assert len(calls) == 1
+    assert calls[0][0] is x
+    assert calls[0][1] is qweight
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+def test_fused_mul_mat_gguf_keeps_iq4_nl_prefill_on_xpu_matmul(monkeypatch):
+    from freetoken.kernel.sycl import causal_conv1d
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf import dequant as dequant_module
+    from freetoken.models.gguf.dequant import GGML_IQ4_NL
+
+    x = torch.ones((2, 32), device="xpu")
+    qweight = torch.empty((2, 18), dtype=torch.uint8, device="xpu")
+    weight = torch.arange(64, dtype=torch.float32, device="xpu").reshape(2, 32)
+
+    def reject_direct(*_args):
+        pytest.fail("IQ4_NL prefill should use the XPU matmul path")
+
+    monkeypatch.setattr(causal_conv1d, "iq4_nl_matvec_sycl", reject_direct)
+    monkeypatch.setattr(
+        dequant_module,
+        "dequantize",
+        lambda _packed, _type, dtype: weight.to(dtype),
+    )
+
+    actual = fused_mul_mat_gguf(x, qweight, GGML_IQ4_NL)
+
+    torch.testing.assert_close(actual, x @ weight.T)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch", [1, 3, 5])
 def test_sycl_q5_0_matvec_matches_dequantized_reference(dtype, batch):
     from freetoken.kernel.sycl.causal_conv1d import q5_0_matvec_sycl
     from freetoken.models.gguf.dequant import GGML_Q5_0, dequantize
