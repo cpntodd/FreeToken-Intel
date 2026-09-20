@@ -95,8 +95,11 @@ tensor parallel XPU launches are rejected rather than silently falling back.
 
 Run `ft devices` to list CUDA and XPU devices, memory, driver/platform identifiers, and
 runtime features such as streams, events, and graph capture. Use `ft devices --json` for
-machine-readable output. If no accelerator is found, the command reports that directly;
-it does not select a CPU inference fallback.
+machine-readable output. The JSON object contains `devices` and `backends`; each backend
+reports whether its runtime is available, unavailable, failed to probe, or only partially
+enumerated. This makes missing drivers and device-property errors visible even when one
+backend still works. If no accelerator is found, the command reports that directly; it does
+not select a CPU inference fallback.
 
 ## Native SYCL kernels
 

@@ -84,30 +84,53 @@ def _run_devices(argv: list[str]) -> int:
     import json
     from dataclasses import asdict
 
-    from freetoken.accelerator import discover_accelerators
+    from freetoken.accelerator import probe_accelerators
 
-    devices = discover_accelerators()
+    discovery = probe_accelerators()
+    devices = discovery.devices
     if argv == ["--json"]:
         records = [
             asdict(capability) | {"device": capability.device} for capability in devices
         ]
-        print(json.dumps(records, indent=2, sort_keys=True))
+        print(
+            json.dumps(
+                {
+                    "devices": records,
+                    "backends": [asdict(backend) for backend in discovery.backends],
+                },
+                indent=2,
+                sort_keys=True,
+            )
+        )
         return 0
 
     if not devices:
         print("No CUDA or XPU accelerator devices detected.")
-        return 0
+    else:
+        for capability in devices:
+            memory_gib = capability.total_memory / (1024**3)
+            print(f"{capability.device} | {capability.name} | {memory_gib:.1f} GiB")
+            print(f"  Device ID: {capability.device_id or 'unavailable'}")
+            print(f"  UUID: {capability.uuid or 'unavailable'}")
+            print(f"  Driver: {capability.driver_version or 'unavailable'}")
+            print(f"  Platform: {capability.platform_name or 'unavailable'}")
+            print(f"  Streams: {'yes' if capability.streams else 'no'}")
+            print(f"  Events: {'yes' if capability.events else 'no'}")
+            print(f"  Graph capture: {'yes' if capability.graph_capture else 'no'}")
 
-    for capability in devices:
-        memory_gib = capability.total_memory / (1024**3)
-        print(f"{capability.device} | {capability.name} | {memory_gib:.1f} GiB")
-        print(f"  Device ID: {capability.device_id or 'unavailable'}")
-        print(f"  UUID: {capability.uuid or 'unavailable'}")
-        print(f"  Driver: {capability.driver_version or 'unavailable'}")
-        print(f"  Platform: {capability.platform_name or 'unavailable'}")
-        print(f"  Streams: {'yes' if capability.streams else 'no'}")
-        print(f"  Events: {'yes' if capability.events else 'no'}")
-        print(f"  Graph capture: {'yes' if capability.graph_capture else 'no'}")
+    print("Backend status:")
+    for backend in discovery.backends:
+        if backend.status == "available":
+            detail = f"available ({backend.device_count} device(s))"
+        elif backend.status == "partial":
+            detail = f"partially available ({backend.device_count} device(s) found)"
+        elif backend.status == "unavailable":
+            detail = "unavailable"
+        else:
+            detail = "probe failed"
+        if backend.message:
+            detail += f": {backend.message}"
+        print(f"  {backend.kind.upper()}: {detail}")
     return 0
 
 

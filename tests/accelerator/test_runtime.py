@@ -8,6 +8,7 @@ from freetoken.accelerator import (
     CudaRuntime,
     XpuRuntime,
     discover_accelerators,
+    probe_accelerators,
     resolve_runtime,
     validate_runtime_request,
 )
@@ -113,6 +114,58 @@ def test_discovery_reports_both_backend_namespaces():
         ("xpu:0", "Intel Arc B580"),
         ("xpu:1", "Intel Arc A770"),
     ]
+
+
+def test_probe_reports_unavailable_and_available_backends():
+    fake = FakeTorch(
+        cuda=FakeApi(available=False, names=()),
+        xpu=FakeApi(available=True, names=("Intel Arc B580",)),
+    )
+
+    discovery = probe_accelerators(fake)
+
+    assert [backend.status for backend in discovery.backends] == [
+        "unavailable",
+        "available",
+    ]
+    assert (
+        discovery.backends[0].message == "PyTorch reports this backend as unavailable"
+    )
+    assert discovery.backends[1].device_count == 1
+    assert [device.device for device in discovery.devices] == ["xpu:0"]
+
+
+def test_probe_surfaces_backend_initialization_errors():
+    fake = FakeTorch(cuda=FakeApi(available=False, names=()), xpu=None)
+
+    discovery = probe_accelerators(fake)
+
+    xpu = discovery.backends[1]
+    assert xpu.status == "error"
+    assert "does not include the XPU backend" in xpu.message
+    assert discovery.devices == ()
+
+
+def test_probe_preserves_devices_when_another_device_probe_fails():
+    xpu = FakeApi(available=True, names=("Intel Arc B580", "Intel Arc A770"))
+    original_get_device_properties = xpu.get_device_properties
+
+    def fail_second_device(index):
+        if index == 1:
+            raise RuntimeError("properties query failed")
+        return original_get_device_properties(index)
+
+    xpu.get_device_properties = fail_second_device
+    fake = FakeTorch(cuda=FakeApi(available=False, names=()), xpu=xpu)
+
+    discovery = probe_accelerators(fake)
+
+    assert [device.device for device in discovery.devices] == ["xpu:0"]
+    assert discovery.backends[1].status == "partial"
+    assert discovery.backends[1].device_count == 1
+    assert "xpu:1: RuntimeError: properties query failed" in (
+        discovery.backends[1].message or ""
+    )
 
 
 def test_missing_xpu_api_has_a_clear_error():

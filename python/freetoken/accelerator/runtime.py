@@ -7,6 +7,7 @@ from typing import Any, Literal
 import torch
 
 AcceleratorKind = Literal["cuda", "xpu"]
+AcceleratorProbeState = Literal["available", "unavailable", "error", "partial"]
 
 
 @dataclass(frozen=True)
@@ -26,6 +27,20 @@ class AcceleratorCapabilities:
     @property
     def device(self) -> str:
         return f"{self.kind}:{self.index}"
+
+
+@dataclass(frozen=True)
+class AcceleratorBackendStatus:
+    kind: AcceleratorKind
+    status: AcceleratorProbeState
+    device_count: int
+    message: str | None
+
+
+@dataclass(frozen=True)
+class AcceleratorDiscovery:
+    devices: tuple[AcceleratorCapabilities, ...]
+    backends: tuple[AcceleratorBackendStatus, ...]
 
 
 class AcceleratorRuntime(ABC):
@@ -180,19 +195,81 @@ def resolve_runtime(
     )
 
 
-def discover_accelerators(
+def probe_accelerators(
     torch_module: Any = torch,
-) -> tuple[AcceleratorCapabilities, ...]:
+) -> AcceleratorDiscovery:
     discovered: list[AcceleratorCapabilities] = []
+    backends: list[AcceleratorBackendStatus] = []
     for kind in ("cuda", "xpu"):
         try:
             runtime = _runtime(kind, torch_module)
-            discovered.extend(
-                runtime.capabilities(index) for index in range(runtime.device_count())
+            if not runtime.is_available():
+                backends.append(
+                    AcceleratorBackendStatus(
+                        kind=kind,
+                        status="unavailable",
+                        device_count=0,
+                        message="PyTorch reports this backend as unavailable",
+                    )
+                )
+                continue
+
+            device_count = runtime.device_count()
+            if device_count <= 0:
+                backends.append(
+                    AcceleratorBackendStatus(
+                        kind=kind,
+                        status="unavailable",
+                        device_count=0,
+                        message="The runtime reports no devices",
+                    )
+                )
+                continue
+
+            backend_devices: list[AcceleratorCapabilities] = []
+            failures: list[str] = []
+            for index in range(device_count):
+                try:
+                    backend_devices.append(runtime.capabilities(index))
+                # A failed device query must not hide other devices or backends.
+                except Exception as exc:  # noqa: BLE001
+                    failures.append(f"{kind}:{index}: {type(exc).__name__}: {exc}")
+
+            discovered.extend(backend_devices)
+            if failures:
+                state: AcceleratorProbeState = "partial" if backend_devices else "error"
+                message = (
+                    f"{len(failures)} of {device_count} device probe(s) failed: "
+                    + "; ".join(failures)
+                )
+            else:
+                state = "available"
+                message = None
+            backends.append(
+                AcceleratorBackendStatus(
+                    kind=kind,
+                    status=state,
+                    device_count=len(backend_devices),
+                    message=message,
+                )
             )
-        except (AttributeError, RuntimeError):
-            continue
-    return tuple(discovered)
+        # Keep discovery best-effort so one broken driver cannot hide the other.
+        except Exception as exc:  # noqa: BLE001
+            backends.append(
+                AcceleratorBackendStatus(
+                    kind=kind,
+                    status="error",
+                    device_count=0,
+                    message=f"{type(exc).__name__}: {exc}",
+                )
+            )
+    return AcceleratorDiscovery(tuple(discovered), tuple(backends))
+
+
+def discover_accelerators(
+    torch_module: Any = torch,
+) -> tuple[AcceleratorCapabilities, ...]:
+    return probe_accelerators(torch_module).devices
 
 
 def validate_runtime_request(
