@@ -1,6 +1,7 @@
+import importlib
 import json
 
-from freetoken import accelerator
+from freetoken import accelerator, cli
 from freetoken.accelerator import (
     AcceleratorBackendStatus,
     AcceleratorCapabilities,
@@ -55,6 +56,11 @@ def test_devices_command_displays_device_and_runtime_features(
     monkeypatch, capsys
 ) -> None:
     monkeypatch.setattr(accelerator, "probe_accelerators", _b580_discovery)
+    monkeypatch.setattr(
+        cli,
+        "_probe_native_sycl_extension",
+        lambda: {"status": "importable", "check": "python_import", "message": None},
+    )
 
     assert main(["devices"]) == 0
 
@@ -67,10 +73,16 @@ def test_devices_command_displays_device_and_runtime_features(
     assert "Engine: single-GPU eager dense inference" in output
     assert "Engine attention: torch" in output
     assert "Engine routed MoE: no" in output
+    assert "Native SYCL extension: importable" in output
 
 
 def test_devices_command_json_is_machine_readable(monkeypatch, capsys) -> None:
     monkeypatch.setattr(accelerator, "probe_accelerators", _b580_discovery)
+    monkeypatch.setattr(
+        cli,
+        "_probe_native_sycl_extension",
+        lambda: {"status": "importable", "check": "python_import", "message": None},
+    )
 
     assert main(["devices", "--json"]) == 0
 
@@ -96,6 +108,91 @@ def test_devices_command_json_is_machine_readable(monkeypatch, capsys) -> None:
         },
         {"device_count": 1, "kind": "xpu", "message": None, "status": "available"},
     ]
+    assert report["native_sycl_extension"] == {
+        "status": "importable",
+        "check": "python_import",
+        "message": None,
+    }
+
+
+def test_devices_command_keeps_xpu_available_when_sycl_extension_fails(
+    monkeypatch, capsys
+) -> None:
+    monkeypatch.setattr(accelerator, "probe_accelerators", _b580_discovery)
+    monkeypatch.setattr(
+        cli,
+        "_probe_native_sycl_extension",
+        lambda: {
+            "status": "load_failed",
+            "check": "python_import",
+            "message": "OSError: libsycl.so.8: cannot open shared object file",
+        },
+    )
+
+    assert main(["devices", "--json"]) == 0
+
+    report = json.loads(capsys.readouterr().out)
+    assert report["backends"][1]["status"] == "available"
+    assert report["native_sycl_extension"] == {
+        "status": "load_failed",
+        "check": "python_import",
+        "message": "OSError: libsycl.so.8: cannot open shared object file",
+    }
+
+
+def test_native_sycl_extension_probe_reports_importable_module(monkeypatch) -> None:
+    def import_module(name: str) -> object:
+        assert name == "freetoken.kernel._sycl_kernels"
+        return object()
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+
+    assert cli._probe_native_sycl_extension() == {
+        "status": "importable",
+        "check": "python_import",
+        "message": None,
+    }
+
+
+def test_native_sycl_extension_probe_reports_missing_module(monkeypatch) -> None:
+    def import_module(name: str) -> object:
+        raise ModuleNotFoundError(f"No module named {name!r}", name=name)
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+
+    assert cli._probe_native_sycl_extension() == {
+        "status": "missing",
+        "check": "python_import",
+        "message": "native SYCL extension is not installed",
+    }
+
+
+def test_native_sycl_extension_probe_reports_load_failure(monkeypatch) -> None:
+    def import_module(name: str) -> object:
+        raise OSError("libsycl.so.8: cannot open shared object file")
+
+    monkeypatch.setattr(importlib, "import_module", import_module)
+
+    result = cli._probe_native_sycl_extension()
+
+    assert result["status"] == "load_failed"
+    assert result["check"] == "python_import"
+    assert "libsycl.so.8" in result["message"]
+
+
+def test_native_sycl_extension_is_not_probed_without_confirmed_xpu(
+    monkeypatch,
+) -> None:
+    def fail_probe() -> dict[str, str | None]:
+        raise AssertionError("SYCL import should not run without a confirmed XPU")
+
+    monkeypatch.setattr(cli, "_probe_native_sycl_extension", fail_probe)
+
+    assert cli._native_sycl_extension_status(False) == {
+        "status": "not_probed",
+        "check": "python_import",
+        "message": "PyTorch did not confirm an available XPU device",
+    }
 
 
 def test_devices_command_reports_empty_accelerator_list_without_cpu_fallback(
@@ -129,6 +226,7 @@ def test_devices_command_reports_empty_accelerator_list_without_cpu_fallback(
     assert "No CUDA or XPU accelerator devices detected." in output
     assert "CUDA: unavailable" in output
     assert "XPU: unavailable: No XPU device was found" in output
+    assert "Native SYCL extension: not_probed" in output
     assert "CPU" not in output
 
 

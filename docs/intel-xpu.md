@@ -333,6 +333,13 @@ enumerated. This makes missing drivers and device-property errors visible even w
 backend still works. If no accelerator is found, the command reports that directly; it does
 not select a CPU inference fallback.
 
+The JSON also contains `native_sycl_extension`, separate from XPU device discovery. Its
+`importable` status means Python could import FreeToken's compiled SYCL extension; it does
+not prove that a particular kernel ran on the device. `missing` means the extension module
+is not installed, while `load_failed` reports an import or shared-library error. The status
+is `not_probed` unless PyTorch confirms an available XPU device. This check does not compile
+the extension, launch a kernel, or change whether the XPU backend is reported as available.
+
 For an XPU device, each device record also includes an `engine` capability object. It reports
 the FreeToken constraints separately from Level Zero features: single-GPU eager dense inference,
 the portable `torch` attention backend, and the current lack of routed-MoE and CUDA-graph

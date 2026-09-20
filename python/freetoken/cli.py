@@ -85,6 +85,44 @@ def _engine_capabilities(kind: str) -> dict[str, object] | None:
     }
 
 
+def _probe_native_sycl_extension() -> dict[str, str | None]:
+    """Report whether the native SYCL module imports, without running a kernel."""
+    from importlib import import_module
+
+    module_name = "freetoken.kernel._sycl_kernels"
+    try:
+        import_module(module_name)
+    except ModuleNotFoundError as exc:
+        if exc.name == module_name:
+            return {
+                "status": "missing",
+                "check": "python_import",
+                "message": "native SYCL extension is not installed",
+            }
+        return {
+            "status": "load_failed",
+            "check": "python_import",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+    except Exception as exc:  # noqa: BLE001
+        return {
+            "status": "load_failed",
+            "check": "python_import",
+            "message": f"{type(exc).__name__}: {exc}",
+        }
+    return {"status": "importable", "check": "python_import", "message": None}
+
+
+def _native_sycl_extension_status(xpu_available: bool) -> dict[str, str | None]:
+    if xpu_available:
+        return _probe_native_sycl_extension()
+    return {
+        "status": "not_probed",
+        "check": "python_import",
+        "message": "PyTorch did not confirm an available XPU device",
+    }
+
+
 def _run_devices(argv: list[str]) -> int:
     if argv in (["-h"], ["--help"]):
         _print_devices_help(sys.stdout)
@@ -101,6 +139,11 @@ def _run_devices(argv: list[str]) -> int:
 
     discovery = probe_accelerators()
     devices = discovery.devices
+    xpu_available = any(
+        backend.kind == "xpu" and backend.status in {"available", "partial"}
+        for backend in discovery.backends
+    )
+    native_sycl_extension = _native_sycl_extension_status(xpu_available)
     if argv == ["--json"]:
         records = [
             asdict(capability)
@@ -115,6 +158,7 @@ def _run_devices(argv: list[str]) -> int:
                 {
                     "devices": records,
                     "backends": [asdict(backend) for backend in discovery.backends],
+                    "native_sycl_extension": native_sycl_extension,
                 },
                 indent=2,
                 sort_keys=True,
@@ -154,6 +198,12 @@ def _run_devices(argv: list[str]) -> int:
         if backend.message:
             detail += f": {backend.message}"
         print(f"  {backend.kind.upper()}: {detail}")
+    sycl_status = native_sycl_extension["status"]
+    sycl_message = native_sycl_extension["message"]
+    detail = f"  Native SYCL extension: {sycl_status}"
+    if sycl_message:
+        detail += f": {sycl_message}"
+    print(detail)
     return 0
 
 
