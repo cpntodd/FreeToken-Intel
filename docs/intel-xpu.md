@@ -411,6 +411,20 @@ FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
   --dtype fp32 --rows 5120 --tokens 3
 ```
 
+The local `Llama-3.2-1B-Instruct-Q4_K_M.gguf` also contains Q6_K weights in active
+decoder layers. A direct SYCL probe of its `blk.0.ffn_down.weight` tensor (shape
+`[8192, 2048]`) covered all 2,048 rows for three FP32 inputs on B580 `xpu:0`; it passed
+with max absolute/relative errors of `6.44e-6` / `7.95e-3`. This tests the native kernel
+against a real active-layer tensor, but not the Llama serving dispatch: the current
+Llama loader dequantizes Q6_K to BF16 before its fused projection.
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
+  experiments/probe_q6_k_real_tensor.py \
+  /home/oddsoul/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --tensor blk.0.ffn_down.weight --dtype fp32 --rows 2048 --tokens 3
+```
+
 The host B580's `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` contains 329 Q4_0 tensors and 338
 F32 tensors, with no Q6_K tensors. The earlier note claiming this checkpoint exercised
 Q6_K was incorrect: those runs used the prior Q4_0 XPU fallback. On this model and the
