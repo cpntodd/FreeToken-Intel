@@ -28,7 +28,7 @@ from freetoken.models.gguf.dequant import (
     row_bytes,
 )
 
-from .base import BaseOP
+from .base import BaseOP, OPList
 
 # ggml type groups for kernel dispatch (subset we build kernels for).
 _UNQUANTIZED = {GGML_F32, GGML_F16, GGML_BF16}
@@ -104,6 +104,21 @@ class GGUFLinear(BaseOP):
         return out
 
 
+class GGUFMergedLinear(BaseOP):
+    """Logical fused projection backed by independently quantized GGUF sources."""
+
+    def __init__(self, in_features: int, parts: list[tuple[int, int]]):
+        self.parts = OPList(
+            [
+                GGUFLinear(in_features, out_features, quant_type)
+                for out_features, quant_type in parts
+            ]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return torch.cat([part.forward(x) for part in self.parts.op_list], dim=-1)
+
+
 class GGUFEmbedding(BaseOP):
     """Vocab embedding stored as a native GGUF block-quantized table.
 
@@ -150,4 +165,4 @@ class GGUFEmbedding(BaseOP):
         return y
 
 
-__all__ = ["GGUFEmbedding", "GGUFLinear", "fused_mul_mat_gguf"]
+__all__ = ["GGUFEmbedding", "GGUFLinear", "GGUFMergedLinear", "fused_mul_mat_gguf"]

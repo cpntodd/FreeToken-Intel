@@ -1,3 +1,4 @@
+import torch
 from freetoken.models.gguf.config import GgufConfigShim
 from freetoken.models.qwen3_5_moe.gguf import parse_gguf_config
 
@@ -59,3 +60,32 @@ def test_qwen35_metadata_rejects_inconsistent_delta_head_geometry():
         assert "value-head count" in str(error)
     else:
         raise AssertionError("expected inconsistent GDN geometry to be rejected")
+
+
+def test_mixed_gguf_linear_keeps_each_projection_in_its_own_quant_format():
+    from freetoken.layers.gguf import GGUFMergedLinear
+    from freetoken.models.gguf.dequant import GGML_Q2_K, GGML_Q5_K, dequantize
+
+    generator = torch.Generator().manual_seed(19)
+    q2 = torch.randint(0, 256, (3, 84), dtype=torch.uint8, generator=generator)
+    q2[:, 80:82] = torch.tensor([0, 52], dtype=torch.uint8)
+    q2[:, 82:84] = torch.tensor([0, 48], dtype=torch.uint8)
+    q5 = torch.randint(0, 256, (2, 176), dtype=torch.uint8, generator=generator)
+    q5[:, 0:2] = torch.tensor([0, 52], dtype=torch.uint8)
+    q5[:, 2:4] = torch.tensor([0, 48], dtype=torch.uint8)
+    layer = GGUFMergedLinear(256, [(3, GGML_Q2_K), (2, GGML_Q5_K)])
+    layer.parts.op_list[0].qweight = q2
+    layer.parts.op_list[1].qweight = q5
+    x = torch.randn(4, 256, generator=generator)
+
+    actual = layer.forward(x)
+    expected = torch.cat(
+        (
+            x @ dequantize(q2, GGML_Q2_K, x.dtype).reshape(3, 256).T,
+            x @ dequantize(q5, GGML_Q5_K, x.dtype).reshape(2, 256).T,
+        ),
+        dim=-1,
+    )
+
+    torch.testing.assert_close(actual, expected)
+    assert set(layer.state_dict()) == {"parts.0.qweight", "parts.1.qweight"}
