@@ -5,6 +5,8 @@ import struct
 import gguf
 import pytest
 import torch
+from tokenizers import Tokenizer, models, pre_tokenizers
+import freetoken.models.gguf.tokenizer as gguf_tokenizer
 from freetoken.models.gguf.reader import (
     gguf_tensor_names,
     iter_gguf_tensors,
@@ -70,3 +72,35 @@ def test_reader_handles_prism_pq2_0_without_changing_gguf_enum(tmp_path):
         load_gguf_metadata(str(metadata_only))["freetoken.output_weight_present"]
         is True
     )
+
+
+def test_load_gguf_tokenizer_registers_user_defined_special_tokens(monkeypatch):
+    tokens = ["<unk>", "<s>", "</s>", "<think>", "<", "think", ">", "<pad>"]
+    token_types = [2, 3, 3, 4, 1, 1, 1, 3]
+    metadata = {
+        "tokenizer.ggml.tokens": tokens,
+        "tokenizer.ggml.token_type": token_types,
+        "tokenizer.ggml.bos_token_id": 1,
+        "tokenizer.ggml.eos_token_id": 2,
+    }
+    backend = Tokenizer(
+        models.BPE(
+            vocab={token: index for index, token in enumerate(tokens)},
+            merges=[],
+            unk_token="<unk>",
+        )
+    )
+    backend.pre_tokenizer = pre_tokenizers.Whitespace()
+    assert backend.encode("<think>", add_special_tokens=False).ids != [3]
+
+    monkeypatch.setattr(gguf_tokenizer, "load_gguf_metadata", lambda _path: metadata)
+    monkeypatch.setattr(gguf_tokenizer, "gguf_architecture", lambda _path: "qwen35")
+    monkeypatch.setattr(
+        "transformers.integrations.ggml.convert_gguf_tokenizer",
+        lambda _arch, _metadata: (backend, {}),
+    )
+
+    tokenizer = gguf_tokenizer.load_gguf_tokenizer("unused.gguf")
+
+    assert tokenizer.encode("<think>", add_special_tokens=False) == [3]
+    assert tokenizer.convert_tokens_to_ids("<think>") == 3

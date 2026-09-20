@@ -364,10 +364,16 @@ describe the distinction.
 The classic `Ternary-Bonsai-27B-PQ2_0.gguf` has no `prism.hadamard.*` metadata. Its
 private type 142 is handled by a per-reader GGUF adapter, a 128-value/34-byte block
 dequantizer, and a native XPU SYCL matvec; the upstream `gguf-py` enum is not modified.
-On the host Arc B580 (device ID `0xE20B`, driver `1.6.33578+15`, Level Zero V2), all four
-direct PQ2_0 dtype/batch cases passed, along with the 59-test SYCL extension file and
-the targeted GGUF reader/dequant/model tests (21 passed). A short end-to-end run of the
-classic checkpoint also loaded and generated `The user wants` using the XPU runtime.
+GGUF `USER_DEFINED` tokenizer entries are registered as additional special tokens. This
+keeps Qwen's `<think>` at its dedicated GGUF ID (`248068`) instead of splitting it into
+three ordinary tokens. FreeToken and Prism `/tokenize` now produce identical IDs for the
+classic prompt (17 tokens) and Bonsai 2 prompt (59 tokens). On the host Arc B580 (device
+ID `0xE20B`, driver `1.6.33578+15`, Level Zero V2), all four direct PQ2_0 dtype/batch
+cases passed, along with the 59-test SYCL extension file and the targeted GGUF
+reader/dequant/model tests (21 passed). A corrected short classic-checkpoint run on
+`xpu:0` generated token IDs `8160, 579, 264` (`Here's a`); a Prism Vulkan run with the
+same 17-token prompt produced the same text. This is a functional smoke, not a quality
+or throughput claim.
 
 The native extension was rebuilt with oneAPI DPC++ 2025.3.3; its `libsycl.so.8` matches
 the `libsycl.so.8` dependency of this PyTorch XPU build. Reproduce the model smoke test
@@ -380,19 +386,15 @@ FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
   --max-tokens 4 --context 128 --kv-tokens 256
 ```
 
-The historical smoke run loaded the model in 38.59 s and generated 3 tokens in 21.43 s.
-It used the earlier whole-generation timer, which included prompt prefill; the updated
-benchmark reports TTFT and inter-token decode rate separately. This short run remains
-functional evidence, not a throughput baseline. For a longer measurement, use
-`--max-tokens 64 --force-decode-length`; the first request is cold and should not be
-treated as a steady-state result.
+The older 38.59 s / 21.43 s measurement predates the tokenizer fix and used the split
+`<think>` prompt. It included prompt prefill and is retained only as historical timing;
+the updated benchmark reports TTFT and inter-token decode rate separately. For a longer
+measurement of the corrected prompt, use `--max-tokens 64 --force-decode-length`; the
+first request is cold and should not be treated as a steady-state result.
 
-The revised benchmark also completed a 16-token forced-length run of this checkpoint on
-the host B580 (PCI `0xE20B`, driver `1.6.33578+15`, Level-Zero V2). With 19 prompt tokens,
-load took 39.54 s, TTFT was 21.57 s, and 14 decode tokens arrived over 5.77 s (2.43
-tokens/s); end-to-end output rate was 0.55 tokens/s over 15 returned tokens. The terminal
-EOS is omitted from the returned list. This single cold sample confirms longer XPU
-execution and separate timing, but it is not a steady-state benchmark.
+The earlier 16-token forced-length benchmark used 19 prompt tokens because `<think>` was
+split into ordinary sub-tokens. Its 39.54 s load / 2.43 tokens/s sample is retained as
+historical data only; it is not a performance baseline for the corrected 17-token prompt.
 
 Bonsai 2 declares a block-1024 normalized Walsh-Hadamard transform, explicit signs,
 inverse token-embedding handling, and grouped GDN values. The Qwen3.5 GGUF loader now
@@ -404,16 +406,16 @@ inverse embeddings still fail closed.
 
 The native SYCL operator has FP32/BF16 parity tests for forward and inverse transforms at
 all three checkpoint widths (5120, 6144, and 17408). Model tests cover projection
-selection, inverse embedding ordering, and the GDN permutation. The complete
-`Ternary-Bonsai-2-27B-PQ2_0.gguf` then loaded and generated on the host Arc B580
-(`xpu:0`, PCI `0xE20B`, driver `1.6.33578+15`, Level Zero V2): a 38.86 s cold load
-produced token IDs `760, 1156, 6587` (`The user wants`) from the benchmark prompt. The
-classic checkpoint produced the same IDs in a separate run. These are short functional
-smokes, not quality or throughput claims. An exact-template CPU run through the local
-Prism `llama-cli` produced `We need to` rather than `The user wants`; generated token IDs
-and logits were not captured, so this is a parity warning rather than a diagnosed cause.
-The B580 result must not be treated as reference-quality evidence until this discrepancy
-is resolved. Reproduce the transformed-checkpoint smoke with:
+selection, inverse embedding ordering, and the GDN permutation. The full
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` loaded on the host Arc B580 (`xpu:0`, PCI `0xE20B`,
+driver `1.6.33578+15`, Level Zero V2) with the corrected 59-token prompt and generated
+token IDs `1596, 1144, 310` (`We need to`). Load took 40.82 s, TTFT was 30.33 s, and two
+decode intervals took 0.96 s (2.08 tokens/s). Prism Vulkan on the same B580 and Prism CPU
+both produced the same short text for the identical prompt; the classic checkpoint also
+matches Prism Vulkan text on its identical 17-token prompt. These checks establish prompt
+token-ID alignment and short continuation agreement, not full logit parity, model quality,
+or steady-state performance. Earlier outputs from prompts with the split `<think>` token
+are superseded. Reproduce the transformed-checkpoint smoke with:
 
 ```bash
 FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \

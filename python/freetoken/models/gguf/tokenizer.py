@@ -12,6 +12,8 @@ from typing import Any
 
 from .reader import gguf_architecture, load_gguf_metadata
 
+_TOKEN_TYPE_USER_DEFINED = 4
+
 # GGUF architecture -> transformers GGUF tokenizer-converter key.
 _TOKENIZER_ARCH = {"gemma4": "gemma4_text", "qwen35": "qwen2"}
 
@@ -31,6 +33,16 @@ def load_gguf_tokenizer(model_path: str):
     fast, _extra = convert_gguf_tokenizer(conv_arch, tok_dict)
 
     tokens = tok_dict["tokens"]
+    token_types = tok_dict.get("token_type")
+    user_defined_tokens = []
+    if token_types is not None:
+        if len(token_types) != len(tokens):
+            raise ValueError("GGUF tokenizer token_type count does not match tokens")
+        user_defined_tokens = [
+            token
+            for token, token_type in zip(tokens, token_types, strict=True)
+            if int(token_type) == _TOKEN_TYPE_USER_DEFINED
+        ]
 
     def tok_for(id_key: str, default: str) -> str:
         tid = meta.get(f"tokenizer.ggml.{id_key}")
@@ -45,6 +57,7 @@ def load_gguf_tokenizer(model_path: str):
         eos_token=turn_end or tok_for("eos_token_id", "<eos>"),
         unk_token=tok_for("unknown_token_id", "<unk>"),
         pad_token=tok_for("padding_token_id", "<pad>"),
+        additional_special_tokens=user_defined_tokens,
     )
     chat_template = meta.get("tokenizer.chat_template")
     if chat_template:
