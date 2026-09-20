@@ -246,6 +246,86 @@ torch::Tensor q4_k_matvec(torch::Tensor x, torch::Tensor qweight) {
   return output;
 }
 
+template <typename scalar_t>
+void launch_q2_k_matvec(const torch::Tensor &x, const torch::Tensor &qweight,
+                        torch::Tensor &output) {
+  constexpr int64_t kBlockSize = 256;
+  constexpr int64_t kBlockBytes = 84;
+  constexpr int64_t kWorkgroupSize = 256;
+  const int64_t batch = x.size(0);
+  const int64_t in_features = x.size(1);
+  const int64_t out_features = qweight.size(0);
+  const int64_t blocks_per_row = in_features / kBlockSize;
+  const auto *x_ptr = reinterpret_cast<const scalar_t *>(x.data_ptr());
+  const auto *weight_ptr = qweight.data_ptr<uint8_t>();
+  auto *out_ptr = reinterpret_cast<scalar_t *>(output.data_ptr());
+  sycl::queue &queue = c10::xpu::getCurrentXPUStream(x.get_device()).queue();
+  const int64_t groups = batch * out_features;
+
+  queue.parallel_for(
+      sycl::nd_range<1>(sycl::range<1>(groups * kWorkgroupSize),
+                        sycl::range<1>(kWorkgroupSize)),
+      [=](sycl::nd_item<1> item) {
+        const int64_t group = item.get_group(0);
+        const int64_t token = group / out_features;
+        const int64_t row = group - token * out_features;
+        float partial = 0.0f;
+        for (int64_t index = item.get_local_id(0); index < in_features;
+             index += kWorkgroupSize) {
+          const int64_t block = index / kBlockSize;
+          const int64_t in_block = index % kBlockSize;
+          const uint8_t *packed = weight_ptr +
+              (row * blocks_per_row + block) * kBlockBytes;
+          const int64_t scale_index = in_block / 16;
+          const uint8_t scale_min = packed[scale_index];
+          const int scale = scale_min & 0x0F;
+          const int minimum = scale_min >> 4;
+          const int64_t group_in_half = scale_index % 8;
+          const int64_t quant_offset = (scale_index / 8) * 32 +
+              (group_in_half % 2) * 16 + in_block % 16;
+          const int shift = (group_in_half / 2) * 2;
+          const int quant = (packed[16 + quant_offset] >> shift) & 0x03;
+          const float d = static_cast<float>(
+              *reinterpret_cast<const sycl::half *>(packed + 80));
+          const float dmin = static_cast<float>(
+              *reinterpret_cast<const sycl::half *>(packed + 82));
+          partial += static_cast<float>(x_ptr[token * in_features + index]) *
+                     (d * static_cast<float>(scale * quant) -
+                      dmin * static_cast<float>(minimum));
+        }
+        const float sum = sycl::reduce_over_group(item.get_group(), partial,
+                                                   sycl::plus<float>());
+        if (item.get_local_id(0) == 0) {
+          out_ptr[group] = static_cast<scalar_t>(sum);
+        }
+      });
+}
+
+torch::Tensor q2_k_matvec(torch::Tensor x, torch::Tensor qweight) {
+  TORCH_CHECK(x.device().is_xpu(), "x must be an XPU tensor");
+  TORCH_CHECK(qweight.device() == x.device(),
+              "qweight must be on the same XPU device as x");
+  TORCH_CHECK(x.dim() == 2 && qweight.dim() == 2,
+              "x and qweight must be rank-2 tensors");
+  TORCH_CHECK(x.is_contiguous() && qweight.is_contiguous(),
+              "x and qweight must be contiguous");
+  TORCH_CHECK(qweight.scalar_type() == torch::kUInt8,
+              "qweight must use uint8 storage");
+  TORCH_CHECK(x.size(1) % 256 == 0,
+              "Q2_K input width must be divisible by 256");
+  TORCH_CHECK(qweight.size(1) == x.size(1) / 256 * 84,
+              "qweight has invalid Q2_K row geometry");
+  auto output = torch::empty({x.size(0), qweight.size(0)}, x.options());
+  if (x.scalar_type() == torch::kFloat32) {
+    launch_q2_k_matvec<float>(x, qweight, output);
+  } else if (x.scalar_type() == torch::kBFloat16) {
+    launch_q2_k_matvec<sycl::ext::oneapi::bfloat16>(x, qweight, output);
+  } else {
+    TORCH_CHECK(false, "q2_k_matvec supports float32 and bfloat16 inputs");
+  }
+  return output;
+}
+
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
@@ -253,4 +333,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
              "SYCL causal depthwise convolution decode");
   module.def("q8_0_matvec", &q8_0_matvec, "SYCL Q8_0 matrix-vector product");
   module.def("q4_k_matvec", &q4_k_matvec, "SYCL Q4_K matrix-vector product");
+  module.def("q2_k_matvec", &q2_k_matvec, "SYCL Q2_K matrix-vector product");
 }
