@@ -25,6 +25,7 @@ GGML_F16 = 1
 GGML_Q4_0 = 2
 GGML_Q4_1 = 3
 GGML_Q5_0 = 6
+GGML_Q5_1 = 7
 GGML_Q8_0 = 8
 GGML_Q2_K = 10
 GGML_Q3_K = 11
@@ -51,6 +52,7 @@ BLOCK_SHAPE: dict[int, tuple[int, int]] = {
     GGML_Q4_0: (32, 18),
     GGML_Q4_1: (32, 20),
     GGML_Q5_0: (32, 22),
+    GGML_Q5_1: (32, 24),
     GGML_Q8_0: (32, 34),
     GGML_Q2_K: (256, 84),
     GGML_Q3_K: (256, 110),
@@ -75,6 +77,7 @@ GGML_NAME = {
     GGML_Q4_0: "Q4_0",
     GGML_Q4_1: "Q4_1",
     GGML_Q5_0: "Q5_0",
+    GGML_Q5_1: "Q5_1",
     GGML_Q8_0: "Q8_0",
     GGML_Q2_K: "Q2_K",
     GGML_Q3_K: "Q3_K",
@@ -167,6 +170,19 @@ def dequant_q5_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     high = (qh[:, bit_indices // 8] >> (bit_indices % 8)) & 1
     q = low | (high << 4)
     return ((q.to(torch.float32) - 16.0) * d).reshape(-1).to(out_dtype)
+
+
+def dequant_q5_1(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q5_1: per 32-element block = fp16 scale/min, 32 high bits, and nibbles."""
+    raw = raw.reshape(-1, 24)
+    dm = raw[:, :4].contiguous().view(torch.float16).to(torch.float32).reshape(-1, 2)
+    qh = raw[:, 4:8].to(torch.int32)
+    qs = raw[:, 8:24].to(torch.int32)
+    low = torch.cat((qs & 0x0F, qs >> 4), dim=1)
+    bit_indices = torch.arange(32, device=raw.device, dtype=torch.int32)
+    high = (qh[:, bit_indices // 8] >> (bit_indices % 8)) & 1
+    q = (low | (high << 4)).to(torch.float32)
+    return (q * dm[:, :1] + dm[:, 1:]).reshape(-1).to(out_dtype)
 
 
 def dequant_q2_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
@@ -589,6 +605,7 @@ _DEQUANT = {
     GGML_Q4_0: dequant_q4_0,
     GGML_Q4_1: dequant_q4_1,
     GGML_Q5_0: dequant_q5_0,
+    GGML_Q5_1: dequant_q5_1,
     GGML_Q2_K: dequant_q2_k,
     GGML_Q3_K: dequant_q3_k,
     GGML_Q4_K: dequant_q4_k,
@@ -637,6 +654,7 @@ __all__ = [
     "GGML_Q4_1",
     "GGML_Q4_K",
     "GGML_Q5_0",
+    "GGML_Q5_1",
     "GGML_Q5_K",
     "GGML_Q6_K",
     "GGML_Q8_0",
@@ -654,6 +672,7 @@ __all__ = [
     "dequant_q4_0",
     "dequant_q4_1",
     "dequant_q5_0",
+    "dequant_q5_1",
     "dequant_q4_k",
     "dequant_q5_k",
     "dequant_q6_k",

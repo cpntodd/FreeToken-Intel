@@ -164,18 +164,18 @@ ownership and stream ordering remain inside the existing engine. FP32 and BF16 o
 and in-place state updates are validated on the Arc B580.
 
 The same extension includes direct packed GGUF matvec kernels for Q4_0, Q4_1, Q5_0,
-Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S,
-IQ3_XXS, and IQ4_XS. Synthetic FP32/BF16 device tests cover each format, real slices from the Qwen3.8
+Q5_1, Q8_0, Q2_K, Q3_K, Q4_K, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS,
+IQ3_S, IQ3_XXS, and IQ4_XS. Synthetic FP32/BF16 device tests cover each format, real slices from the Qwen3.8
 checkpoint match the FP32 dequantized reference, and the complete packed Qwen serving
-model has run through the public `LLM` API on the B580. Q4_0, Q4_1, and Q5_0 currently
-use the native SYCL kernels for single-token decode; larger XPU batches retain the
-existing chunked dequantize-plus-matmul path. The supplied model set has no Q4_1- or
-Q5_0-designated checkpoint, so their coverage is synthetic rather than full-model. Two
-warmed 15-iteration B580 microbenchmarks at `[1, 4096] x [4096, 4096]` (BF16) measured
-median direct-SYCL vs XPU dequantize-plus-matmul times of 0.677 vs 2.841 ms for Q4_1 and
-0.428 vs 4.128 ms for Q5_0; output parity passed for both. These are synthetic samples,
-not end-to-end model performance. The decode-only dispatch avoids CPU fallback while
-keeping prompt batches on XPU matmul.
+model has run through the public `LLM` API on the B580. Q4_0, Q4_1, Q5_0, and Q5_1
+currently use the native SYCL kernels for single-token decode; larger XPU batches retain
+the existing chunked dequantize-plus-matmul path. The supplied model set has no Q4_1-,
+Q5_0-, or Q5_1-designated checkpoint, so their coverage is synthetic rather than
+full-model. Warmed 15-iteration B580 microbenchmarks at `[1, 4096] x [4096, 4096]` (BF16)
+measured median direct-SYCL vs XPU dequantize-plus-matmul times of 0.677 vs 2.841 ms for
+Q4_1, 0.428 vs 4.128 ms for Q5_0, and 0.520 vs 4.584 ms for Q5_1; output parity passed
+for all three. These are synthetic samples, not end-to-end model performance. The
+decode-only dispatch avoids CPU fallback while keeping prompt batches on XPU matmul.
 Other active-serving packed formats retain their small-batch and four-token tiled paths.
 In the recorded Qwen3.8 checkpoint, Q6_K is
 present only in the MTP layer that serving currently omits; synthetic tests cover the
