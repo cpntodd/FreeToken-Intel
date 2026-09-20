@@ -168,6 +168,15 @@ was 0.63. This establishes top-token agreement, not full-vocabulary or logits pa
 the score differences remain a numerical validation gap. `nvtop` showed B580 memory
 use during each engine run; its utilization field was unavailable.
 
+As a smaller-checkpoint control, the same probe compared
+`Llama-3.2-1B-Instruct-Q4_K_M.gguf` on a 35-token prompt. FreeToken XPU and Prism
+Vulkan0 on the B580 both selected token ID 9906, with identical top-20 IDs; the mean
+and maximum absolute log-probability differences among those tokens were 0.049 and
+0.105. Prism's loaded model used B580 memory according to `nvtop`. This is closer
+agreement than the Qwen Q2_K run, but the model architecture and quantization both
+differ, so it only narrows the discrepancy to the Qwen/checkpoint path; it does not
+identify Q2_K or prove full-logit parity.
+
 The same public XPU path completed a forced-length smoke for the local
 `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` checkpoint on this B580. Its earlier 61-token
 sample (48.85 s load, 1.53 prompt tokens/s, and 0.794 decode tokens/s) used the
