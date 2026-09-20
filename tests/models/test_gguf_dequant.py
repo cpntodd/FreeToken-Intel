@@ -41,6 +41,14 @@ def test_q4_k_dequant_matches_gguf_reference():
         (GGML_Q2_K, 84),
         (GGML_Q3_K, 110),
         (GGML_Q5_K, 176),
+        (GGML_IQ1_S, 50),
+        (GGML_IQ1_M, 56),
+        (GGML_IQ2_XXS, 66),
+        (GGML_IQ2_XS, 74),
+        (GGML_IQ2_S, 82),
+        (GGML_IQ3_XXS, 98),
+        (GGML_IQ3_S, 110),
+        (GGML_IQ4_XS, 136),
     ],
 )
 def test_additional_k_quant_dequant_matches_gguf_reference(quant_type, block_size):
@@ -51,6 +59,23 @@ def test_additional_k_quant_dequant_matches_gguf_reference(quant_type, block_siz
         raw[:, 82:84] = np.array([0.125], dtype=np.float16).view(np.uint8)
     elif quant_type == GGML_Q3_K:
         raw[:, 108:110] = np.array([0.25], dtype=np.float16).view(np.uint8)
+    elif (
+        quant_type
+        in {
+            GGML_IQ2_XXS,
+            GGML_IQ2_XS,
+            GGML_IQ2_S,
+            GGML_IQ3_XXS,
+            GGML_IQ3_S,
+            GGML_IQ4_XS,
+        }
+        or quant_type == GGML_IQ1_S
+    ):
+        raw[:, 0:2] = np.array([0.25], dtype=np.float16).view(np.uint8)
+    elif quant_type == GGML_IQ1_M:
+        raw[:, 48:56] = 0
+        raw[:, 53] = 0x40
+        raw[:, 55] = 0x30
     else:
         raw[:, 0:2] = np.array([0.25], dtype=np.float16).view(np.uint8)
         raw[:, 2:4] = np.array([0.125], dtype=np.float16).view(np.uint8)

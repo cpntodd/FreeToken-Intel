@@ -16,6 +16,8 @@ math mirrors ``ggml-quants.c``.
 
 from __future__ import annotations
 
+import functools
+
 import torch
 
 # ggml_type enum values (subset present in these checkpoints).
@@ -100,6 +102,28 @@ def _f16_scales(raw: torch.Tensor, lo: int, hi: int) -> torch.Tensor:
     return raw[:, lo:hi].contiguous().view(torch.float16).to(torch.float32)
 
 
+@functools.cache
+def _iq_table(name: str, device: torch.device) -> torch.Tensor:
+    """Decode gguf-py's canonical IQ lookup table once per accelerator device."""
+    from gguf import quants
+
+    quant = getattr(quants, name)
+    quant.init_grid()
+    return torch.from_numpy(quant.grid.squeeze()).to(device=device, dtype=torch.float32)
+
+
+@functools.cache
+def _iq_signs(device: torch.device) -> torch.Tensor:
+    from gguf.quants import IQ2_XXS
+
+    return torch.tensor(list(IQ2_XXS.ksigns), dtype=torch.int64, device=device)
+
+
+def _little_u32(raw: torch.Tensor) -> torch.Tensor:
+    raw = raw.to(torch.int64).reshape(*raw.shape[:-1], -1, 4)
+    return raw[..., 0] | (raw[..., 1] << 8) | (raw[..., 2] << 16) | (raw[..., 3] << 24)
+
+
 def dequant_q4_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     """Q4_0: per 32-elem block = fp16 scale ``d`` + 16 packed nibbles; ``w = d*(q-8)``.
 
@@ -130,10 +154,9 @@ def dequant_q2_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
             for offset in (0, 16):
                 scale = scales[:, group : group + 1]
                 values = (packed[:, offset : offset + 16] >> shift) & 0x03
-                output[:, group * 16 : (group + 1) * 16] = (
-                    d * (scale & 0x0F).to(torch.float32) * values.to(torch.float32)
-                    - dmin * (scale >> 4).to(torch.float32)
-                )
+                output[:, group * 16 : (group + 1) * 16] = d * (scale & 0x0F).to(
+                    torch.float32
+                ) * values.to(torch.float32) - dmin * (scale >> 4).to(torch.float32)
                 group += 1
     return output.reshape(-1).to(out_dtype)
 
@@ -160,10 +183,13 @@ def dequant_q3_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
         ((words[0] >> 4) & mask4) | (((words[2] >> 4) & mask2) << 4),
         ((words[1] >> 4) & mask4) | (((words[2] >> 6) & mask2) << 4),
     )
-    scales = torch.stack(
-        [(word >> (8 * byte)) & 0xFF for word in scale_words for byte in range(4)],
-        dim=1,
-    ).to(torch.float32) - 32.0
+    scales = (
+        torch.stack(
+            [(word >> (8 * byte)) & 0xFF for word in scale_words for byte in range(4)],
+            dim=1,
+        ).to(torch.float32)
+        - 32.0
+    )
 
     output = torch.empty((raw.shape[0], 256), dtype=torch.float32, device=raw.device)
     group = 0
@@ -193,11 +219,11 @@ def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
 
     y = torch.empty((n, 256), dtype=torch.float32, device=raw.device)
     # l in 0..15 -> is=0; l in 16..31 -> is=1 (per ggml: is = l/16).
-    is_idx = (torch.arange(32, device=raw.device) // 16)  # [32] in {0,1}
+    is_idx = torch.arange(32, device=raw.device) // 16  # [32] in {0,1}
     for h in range(2):  # two 128-elem halves of the super-block
-        qlh = ql[:, h * 64:(h + 1) * 64]  # [n,64]
-        qhh = qh[:, h * 32:(h + 1) * 32]  # [n,32]
-        sch = sc[:, h * 8:(h + 1) * 8]  # [n,8]
+        qlh = ql[:, h * 64 : (h + 1) * 64]  # [n,64]
+        qhh = qh[:, h * 32 : (h + 1) * 32]  # [n,32]
+        sch = sc[:, h * 8 : (h + 1) * 8]  # [n,8]
         a = qlh[:, 0:32].to(torch.int32)  # ql[l]
         b = qlh[:, 32:64].to(torch.int32)  # ql[l+32]
         hb = qhh.to(torch.int32)  # qh[l]
@@ -210,10 +236,10 @@ def dequant_q6_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
         s3 = sch.index_select(1, is_idx + 4).to(torch.float32)
         s4 = sch.index_select(1, is_idx + 6).to(torch.float32)
         base = h * 128
-        y[:, base + 0:base + 32] = d * s1 * q1.to(torch.float32)
-        y[:, base + 32:base + 64] = d * s2 * q2.to(torch.float32)
-        y[:, base + 64:base + 96] = d * s3 * q3.to(torch.float32)
-        y[:, base + 96:base + 128] = d * s4 * q4.to(torch.float32)
+        y[:, base + 0 : base + 32] = d * s1 * q1.to(torch.float32)
+        y[:, base + 32 : base + 64] = d * s2 * q2.to(torch.float32)
+        y[:, base + 64 : base + 96] = d * s3 * q3.to(torch.float32)
+        y[:, base + 96 : base + 128] = d * s4 * q4.to(torch.float32)
     return y.reshape(-1).to(out_dtype)
 
 
@@ -248,8 +274,7 @@ def dequant_q4_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
         high = (packed >> 4).to(torch.float32)
         first = group * 2
         output[:, group * 64 : group * 64 + 32] = (
-            d * scales[:, first : first + 1] * low
-            - dmin * mins[:, first : first + 1]
+            d * scales[:, first : first + 1] * low - dmin * mins[:, first : first + 1]
         )
         output[:, group * 64 + 32 : (group + 1) * 64] = (
             d * scales[:, first + 1 : first + 2] * high
@@ -290,19 +315,227 @@ def dequant_q5_k(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
         high_high = ((qh & (2 << (2 * group))) != 0).to(torch.int32) << 4
         first = group * 2
         output[:, group * 64 : group * 64 + 32] = (
-            d * scales[:, first : first + 1]
+            d
+            * scales[:, first : first + 1]
             * ((packed & 0x0F) + high_low).to(torch.float32)
             - dmin * mins[:, first : first + 1]
         )
         output[:, group * 64 + 32 : (group + 1) * 64] = (
-            d * scales[:, first + 1 : first + 2]
+            d
+            * scales[:, first + 1 : first + 2]
             * ((packed >> 4) + high_high).to(torch.float32)
             - dmin * mins[:, first + 1 : first + 2]
         )
     return output.reshape(-1).to(out_dtype)
 
 
+def dequant_iq4_xs(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ4_XS: nonlinear four-bit codebook with signed six-bit sub-block scales."""
+    raw = raw.reshape(-1, 136)
+    d = _f16_scales(raw, 0, 2)
+    scales_h = raw[:, 2].to(torch.int32) | (raw[:, 3].to(torch.int32) << 8)
+    scales_l = raw[:, 4:8].to(torch.int32)
+    qs = raw[:, 8:136].to(torch.int64)
+    codebook = torch.tensor(
+        [-127, -104, -83, -65, -49, -35, -22, -10, 1, 13, 25, 38, 53, 69, 89, 113],
+        dtype=torch.float32,
+        device=raw.device,
+    )
+
+    output = torch.empty((raw.shape[0], 256), dtype=torch.float32, device=raw.device)
+    for group in range(8):
+        low = (scales_l[:, group // 2] >> (4 * (group % 2))) & 0x0F
+        high = ((scales_h >> (2 * group)) & 0x03) << 4
+        scale = (low | high).to(torch.float32) - 32.0
+        packed = qs[:, group * 16 : (group + 1) * 16]
+        base = group * 32
+        output[:, base : base + 16] = d * scale[:, None] * codebook[(packed & 0x0F)]
+        output[:, base + 16 : base + 32] = d * scale[:, None] * codebook[(packed >> 4)]
+    return output.reshape(-1).to(out_dtype)
+
+
+def dequant_iq2_xxs(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ2_XXS: four signed eight-value grid entries per 32-value sub-block."""
+    raw = raw.reshape(-1, 66)
+    d = _f16_scales(raw, 0, 2)
+    words = _little_u32(raw[:, 2:66]).reshape(raw.shape[0], 8, 2)
+    scale = d * (0.5 + (words[..., 1] >> 28).to(torch.float32)) * 0.25
+
+    shifts = torch.tensor([0, 7, 14, 21], dtype=torch.int64, device=raw.device)
+    sign_indices = (words[..., 1, None] >> shifts) & 0x7F
+    packed_signs = _iq_signs(raw.device)[sign_indices]
+    bits = torch.arange(8, dtype=torch.int64, device=raw.device)
+    signs = torch.where(((packed_signs[..., None] >> bits) & 1) == 0, 1.0, -1.0)
+
+    grid_indices = torch.stack(
+        [(words[..., 0] >> shift) & 0xFF for shift in (0, 8, 16, 24)], dim=-1
+    )
+    grid = _iq_table("IQ2_XXS", raw.device)[grid_indices]
+    return (scale[..., None, None] * grid * signs).reshape(-1).to(out_dtype)
+
+
+def _unpack_signs(packed_signs: torch.Tensor) -> torch.Tensor:
+    bits = torch.arange(8, dtype=torch.int64, device=packed_signs.device)
+    return torch.where(((packed_signs[..., None] >> bits) & 1) == 0, 1.0, -1.0)
+
+
+def dequant_iq2_xs(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ2_XS: two signed grid entries per 16-bit code and nibble scales."""
+    raw = raw.reshape(-1, 74)
+    d = _f16_scales(raw, 0, 2)
+    pairs = raw[:, 2:66].to(torch.int64).reshape(raw.shape[0], 32, 2)
+    codes = pairs[..., 0] | (pairs[..., 1] << 8)
+    codes = codes.reshape(raw.shape[0], 8, 4)
+    packed_signs = _iq_signs(raw.device)[codes >> 9]
+    signs = _unpack_signs(packed_signs)
+    grid = _iq_table("IQ2_XS", raw.device)[codes & 0x1FF]
+    scales = raw[:, 66:74].to(torch.int64)
+    scales = torch.stack((scales & 0x0F, scales >> 4), dim=-1)
+    scale = d * (0.5 + scales.reshape(raw.shape[0], 16).to(torch.float32)) * 0.25
+    return (
+        (
+            scale.reshape(raw.shape[0], 8, 2, 1, 1)
+            * grid.reshape(raw.shape[0], 8, 2, 2, 8)
+            * signs.reshape(raw.shape[0], 8, 2, 2, 8)
+        )
+        .reshape(-1)
+        .to(out_dtype)
+    )
+
+
+def dequant_iq2_s(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ2_S: ten-bit grid indices, explicit sign bytes, and nibble scales."""
+    raw = raw.reshape(-1, 82)
+    d = _f16_scales(raw, 0, 2)
+    low = raw[:, 2:34].to(torch.int64).reshape(raw.shape[0], 8, 4)
+    packed_signs = raw[:, 34:66].to(torch.int64).reshape(raw.shape[0], 8, 4)
+    high = raw[:, 66:74].to(torch.int64)
+    indices = torch.stack(
+        [low[..., part] | ((high << (8 - 2 * part)) & 0x300) for part in range(4)],
+        dim=-1,
+    )
+    grid = _iq_table("IQ2_S", raw.device)[indices]
+    signs = _unpack_signs(packed_signs)
+    scales = raw[:, 74:82].to(torch.int64)
+    scales = torch.stack((scales & 0x0F, scales >> 4), dim=-1)
+    scale = d * (0.5 + scales.reshape(raw.shape[0], 16).to(torch.float32)) * 0.25
+    return (
+        (
+            scale.reshape(raw.shape[0], 8, 2, 1, 1)
+            * grid.reshape(raw.shape[0], 8, 2, 2, 8)
+            * signs.reshape(raw.shape[0], 8, 2, 2, 8)
+        )
+        .reshape(-1)
+        .to(out_dtype)
+    )
+
+
+def dequant_iq3_xxs(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ3_XXS: paired four-value grids with compact signs and sub-block scales."""
+    raw = raw.reshape(-1, 98)
+    d = _f16_scales(raw, 0, 2)
+    qs = raw[:, 2:66].to(torch.int64).reshape(raw.shape[0], 8, 8)
+    aux = _little_u32(raw[:, 66:98]).reshape(raw.shape[0], 8)
+    scale = d * (0.5 + (aux >> 28).to(torch.float32)) * 0.5
+    shifts = torch.tensor([0, 7, 14, 21], dtype=torch.int64, device=raw.device)
+    packed_signs = _iq_signs(raw.device)[(aux[..., None] >> shifts) & 0x7F]
+    signs = _unpack_signs(packed_signs)
+    table = _iq_table("IQ3_XXS", raw.device)
+    grids = torch.cat((table[qs[..., 0::2]], table[qs[..., 1::2]]), dim=-1)
+    return (scale[..., None, None] * grids * signs).reshape(-1).to(out_dtype)
+
+
+def dequant_iq3_s(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ3_S: nine-bit four-value grids with explicit signs and odd scales."""
+    raw = raw.reshape(-1, 110)
+    d = _f16_scales(raw, 0, 2)
+    qs = raw[:, 2:66].to(torch.int64).reshape(raw.shape[0], 8, 8)
+    qh = raw[:, 66:74].to(torch.int64)
+    packed_signs = raw[:, 74:106].to(torch.int64).reshape(raw.shape[0], 8, 4)
+    scales = raw[:, 106:110].to(torch.int64)
+    scales = torch.stack((scales & 0x0F, scales >> 4), dim=-1).reshape(raw.shape[0], 8)
+    scale = d * (1.0 + 2.0 * scales.to(torch.float32))
+    table = _iq_table("IQ3_S", raw.device)
+    groups = []
+    for part in range(4):
+        first = qs[..., 2 * part] | ((qh << (8 - 2 * part)) & 0x100)
+        second = qs[..., 2 * part + 1] | ((qh << (7 - 2 * part)) & 0x100)
+        groups.append(torch.cat((table[first], table[second]), dim=-1))
+    grid = torch.stack(groups, dim=2)
+    signs = _unpack_signs(packed_signs)
+    return (scale[..., None, None] * grid * signs).reshape(-1).to(out_dtype)
+
+
+def dequant_iq1_s(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ1_S: eleven-bit grid indices with per-sub-block shift and scale."""
+    raw = raw.reshape(-1, 50)
+    d = _f16_scales(raw, 0, 2)
+    qs = raw[:, 2:34].to(torch.int64).reshape(raw.shape[0], 8, 4)
+    qh_bytes = raw[:, 34:50].to(torch.int64).reshape(raw.shape[0], 8, 2)
+    qh = qh_bytes[..., 0] | (qh_bytes[..., 1] << 8)
+    indices = torch.stack(
+        [qs[..., part] | (((qh >> (3 * part)) & 0x07) << 8) for part in range(4)],
+        dim=-1,
+    )
+    grid = _iq_table("IQ1_S", raw.device)[indices]
+    scale = d * (2.0 * ((qh >> 12) & 0x07).to(torch.float32) + 1.0)
+    delta = torch.where((qh & 0x8000) == 0, 0.125, -0.125)
+    return (
+        (scale[..., None, None] * (grid + delta[..., None, None]))
+        .reshape(-1)
+        .to(out_dtype)
+    )
+
+
+def dequant_iq1_m(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """IQ1_M: IQ1 grids with a split FP16 super-scale and paired block scales."""
+    raw = raw.reshape(-1, 56)
+    qs = raw[:, 0:32].to(torch.int64).reshape(raw.shape[0], 8, 4)
+    qh = raw[:, 32:48].to(torch.int64).reshape(raw.shape[0], 8, 2)
+    scale_bytes = raw[:, 48:56].to(torch.int64).reshape(raw.shape[0], 4, 2)
+    scale_words = scale_bytes[..., 0] | (scale_bytes[..., 1] << 8)
+    d_bits = (
+        (scale_words[:, 0] >> 12)
+        | ((scale_words[:, 1] >> 8) & 0x00F0)
+        | ((scale_words[:, 2] >> 4) & 0x0F00)
+        | (scale_words[:, 3] & 0xF000)
+    )
+    d = d_bits.to(torch.int16).view(torch.float16).to(torch.float32).reshape(-1, 1, 1)
+    shifts = torch.tensor([0, 3, 6, 9], dtype=torch.int64, device=raw.device)
+    scales = ((scale_words[..., None] >> shifts) & 0x07).reshape(raw.shape[0], 8, 2)
+    scale = d * (2.0 * scales.to(torch.float32) + 1.0)
+
+    indices = torch.stack(
+        (
+            qs[..., 0] | ((qh[..., 0] & 0x07) << 8),
+            qs[..., 1] | (((qh[..., 0] >> 4) & 0x07) << 8),
+            qs[..., 2] | ((qh[..., 1] & 0x07) << 8),
+            qs[..., 3] | (((qh[..., 1] >> 4) & 0x07) << 8),
+        ),
+        dim=-1,
+    )
+    grid = _iq_table("IQ1_M", raw.device)[indices].reshape(raw.shape[0], 8, 2, 2, 8)
+    delta = torch.stack(
+        (
+            torch.where((qh[..., 0] & 0x08) == 0, 0.125, -0.125),
+            torch.where((qh[..., 0] & 0x80) == 0, 0.125, -0.125),
+            torch.where((qh[..., 1] & 0x08) == 0, 0.125, -0.125),
+            torch.where((qh[..., 1] & 0x80) == 0, 0.125, -0.125),
+        ),
+        dim=-1,
+    ).reshape(raw.shape[0], 8, 2, 2, 1)
+    return (scale[..., None, None] * (grid + delta)).reshape(-1).to(out_dtype)
+
+
 _DEQUANT = {
+    GGML_IQ1_M: dequant_iq1_m,
+    GGML_IQ1_S: dequant_iq1_s,
+    GGML_IQ2_S: dequant_iq2_s,
+    GGML_IQ2_XS: dequant_iq2_xs,
+    GGML_IQ2_XXS: dequant_iq2_xxs,
+    GGML_IQ3_S: dequant_iq3_s,
+    GGML_IQ3_XXS: dequant_iq3_xxs,
+    GGML_IQ4_XS: dequant_iq4_xs,
     GGML_Q4_0: dequant_q4_0,
     GGML_Q2_K: dequant_q2_k,
     GGML_Q3_K: dequant_q3_k,
@@ -312,7 +545,9 @@ _DEQUANT = {
 }
 
 
-def dequantize(raw: torch.Tensor, ggml_type: int, out_dtype: torch.dtype) -> torch.Tensor:
+def dequantize(
+    raw: torch.Tensor, ggml_type: int, out_dtype: torch.dtype
+) -> torch.Tensor:
     """Dequantize ``raw`` (uint8) of any supported ggml type to flat ``out_dtype``."""
     if ggml_type == GGML_F32:
         return raw.view(torch.float32).to(out_dtype)
@@ -349,6 +584,14 @@ __all__ = [
     "GGML_Q5_K",
     "GGML_Q6_K",
     "GGML_Q8_0",
+    "dequant_iq1_m",
+    "dequant_iq1_s",
+    "dequant_iq2_s",
+    "dequant_iq2_xs",
+    "dequant_iq2_xxs",
+    "dequant_iq3_s",
+    "dequant_iq3_xxs",
+    "dequant_iq4_xs",
     "dequant_q2_k",
     "dequant_q3_k",
     "dequant_q4_0",
