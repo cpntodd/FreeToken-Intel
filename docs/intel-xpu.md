@@ -132,6 +132,42 @@ tokens/s. Prism Vulkan generated the same short text from the exact prompt. This
 prompt-token parity and short text-level agreement, not logits parity or a general
 model-quality result.
 
+A reusable first-token score probe is in
+`experiments/compare_xpu_prism_logits.py`. Run `capture-xpu` with Prism stopped,
+then run the same GGUF on Prism `llama-server` with `--device Vulkan0`, capture its
+`/completion` top probabilities with `capture-prism`, and use `compare`. The two
+engines are run sequentially to fit the B580's 12 GB memory. The probe sends the
+exact FreeToken token IDs to Prism and compares pre-sampler FreeToken log-softmax
+scores with Prism `n_probs` output; it does not modify serving behavior.
+
+For a repeatable comparison, first capture FreeToken with Prism stopped:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python:. \
+  .venv/bin/python experiments/compare_xpu_prism_logits.py capture-xpu \
+  /path/to/model.gguf --output /tmp/xpu-scores.json
+```
+
+Then start Prism `llama-server` on that same model with `--device Vulkan0` and
+capture/compare its response:
+
+```bash
+PYTHONPATH=python:. .venv/bin/python experiments/compare_xpu_prism_logits.py \
+  capture-prism --xpu-json /tmp/xpu-scores.json \
+  --server-url http://127.0.0.1:8080 --reference-backend Vulkan0 \
+  --output /tmp/prism-scores.json
+PYTHONPATH=python:. .venv/bin/python experiments/compare_xpu_prism_logits.py \
+  compare --xpu-json /tmp/xpu-scores.json --prism-json /tmp/prism-scores.json
+```
+
+On 2026-09-21, this probe ran the first token for the same Qwen Q2_K checkpoint and
+59-token prompt on FreeToken XPU and Prism Vulkan0 on the B580. Both selected token
+ID 760 (`The`), and the top-five IDs matched. The top-20 sets overlapped 18/20; among
+shared candidates, mean absolute log-probability difference was 0.18 and the maximum
+was 0.63. This establishes top-token agreement, not full-vocabulary or logits parity;
+the score differences remain a numerical validation gap. `nvtop` showed B580 memory
+use during each engine run; its utilization field was unavailable.
+
 The same public XPU path completed a forced-length smoke for the local
 `Qwen3.8-27B-GSQ-RCO-IQ3_XXS-mtp.gguf` checkpoint on this B580. Its earlier 61-token
 sample (48.85 s load, 1.53 prompt tokens/s, and 0.794 decode tokens/s) used the
