@@ -178,8 +178,19 @@ for all three. These are synthetic samples, not end-to-end model performance. Th
 decode-only dispatch avoids CPU fallback while keeping prompt batches on XPU matmul.
 Other active-serving packed formats retain their small-batch and four-token tiled paths.
 In the recorded Qwen3.8 checkpoint, Q6_K is
-present only in the MTP layer that serving currently omits; synthetic tests cover the
-new Q6_K path, but no real checkpoint inference has yet exercised it.
+present only in the MTP layer that serving currently omits. A bounded probe now reads
+16 packed rows from the real `blk.64.attn_output.weight` tensor (GGML shape
+`[6144, 5120]`) and checks three input tokens against the canonical dequantized CPU
+reference on B580 `xpu:0`. FP32 max absolute/relative errors were `2.50e-6` / `1.48e-5`;
+BF16 outputs matched exactly. This exercises actual Q6_K weight bytes but does not run
+the omitted MTP layer or a full Q6_K model. The probe copies only the requested rows:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
+  experiments/probe_q6_k_real_tensor.py \
+  /home/oddsoul/models/Qwen3.8-27B-UD-Q2_K_XL.gguf \
+  --dtype fp32 --rows 16 --tokens 3
+```
 
 The host B580's `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` contains 329 Q4_0 tensors and 338
 F32 tensors, with no Q6_K tensors. The earlier note claiming this checkpoint exercised
