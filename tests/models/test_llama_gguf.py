@@ -47,6 +47,18 @@ def test_reverse_rope_permute_restores_hf_row_order():
     torch.testing.assert_close(restored, torch.arange(8).reshape(8, 1))
 
 
+def test_reverse_rope_permute_preserves_opaque_packed_rows():
+    expected_rows = torch.arange(24, dtype=torch.uint8).reshape(8, 3)
+    gguf_order = torch.tensor([0, 2, 1, 3, 4, 6, 5, 7])
+    packed_rows = expected_rows.index_select(0, gguf_order)
+
+    restored = _reverse_rope_permute(packed_rows, num_heads=2)
+
+    assert restored.dtype == packed_rows.dtype
+    assert restored.shape == packed_rows.shape
+    assert torch.equal(restored, expected_rows)
+
+
 def test_llama_qkv_openvino_island_is_opt_in_and_restores_activation_dtype():
     hidden_states = torch.zeros((2, 8), dtype=torch.bfloat16)
     island_result = OpenVINOIslandResult(
