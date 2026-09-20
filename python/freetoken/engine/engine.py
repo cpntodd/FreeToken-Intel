@@ -1526,6 +1526,12 @@ def _adjust_config(config: EngineConfig):
                 f"experts); ignoring MoE settings: {', '.join(dropped)}"
             )
 
+    if is_moe and config.accelerator == "xpu":
+        raise ValueError(
+            "the XPU eager path does not yet support routed MoE experts; "
+            "use a dense checkpoint or --accelerator cuda"
+        )
+
     if single_stream_only:
         # The model runs one sequence at a time: it collapses the batch to one row and the
         # decode CUDA graph is captured at bs=1. Force the runtime knobs so the KV pool, page

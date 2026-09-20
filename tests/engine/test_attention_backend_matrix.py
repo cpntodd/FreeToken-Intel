@@ -52,6 +52,9 @@ def _model_config(kind):
     )
     if kind == "full":
         specs = (_spec("full", AttnType.FULL),)
+    elif kind == "moe":
+        mc.is_moe = True
+        specs = (_spec("full", AttnType.FULL),)
     elif kind == "swa":
         mc.has_swa_attention = True
         specs = (
@@ -142,6 +145,21 @@ def test_xpu_rejects_cuda_attention_backend(monkeypatch):
     _patch_env(monkeypatch)
     config = _config("full", accelerator="xpu", attention_backend="triton")
     with pytest.raises(ValueError, match="requires --attention-backend torch"):
+        _adjust_config(config)
+
+
+@pytest.mark.parametrize("moe_strategy", ["auto", "fused", "offload", "cpu", "hybrid"])
+def test_xpu_rejects_routed_moe_before_cuda_only_setup(monkeypatch, moe_strategy):
+    from freetoken.engine.engine import _adjust_config
+
+    _patch_env(monkeypatch)
+    config = _config(
+        "moe",
+        accelerator="xpu",
+        attention_backend="auto",
+        moe_strategy=moe_strategy,
+    )
+    with pytest.raises(ValueError, match="does not yet support routed MoE"):
         _adjust_config(config)
 
 

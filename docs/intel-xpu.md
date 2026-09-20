@@ -120,8 +120,11 @@ For a non-system Level Zero SDK, expose its header and loader paths through `CPA
 selected device, PCI ID, driver, and Level Zero platform in the benchmark JSON.
 
 Current constraints are explicit: one XPU only, eager execution only, and the portable
-`torch` attention backend for FULL/SWA models. CUDA graphs, CUDA device identifiers, and
-tensor parallel XPU launches are rejected rather than silently falling back.
+`torch` attention backend for FULL/SWA models. Routed MoE checkpoints are rejected on XPU
+before loading because their current host-bank, slot-cache, and expert kernels use CUDA-only
+registration and stream APIs; use a dense checkpoint on XPU or CUDA for routed MoE. CUDA
+graphs, CUDA device identifiers, and tensor parallel XPU launches are rejected rather than
+silently falling back.
 
 KV and recurrent-state cache rebuilds release their old slabs through the selected CUDA
 or XPU runtime before allocating replacements. On the B580, an XPU MHA cache resize kept
