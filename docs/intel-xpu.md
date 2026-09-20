@@ -16,6 +16,18 @@ PyTorch `2.14.0+xpu` was also tested on this host. It enumerated the B580 but ab
 inside Intel's command encoder on its first submitted kernel, so it is not a supported
 combination yet.
 
+## Hardware validation scope
+
+FreeToken has been validated on an Arc B580 only. Other Arc discrete GPUs and Intel
+integrated Arc GPUs are targets for broader support, but are not yet verified by this
+project. Upstream PyTorch's [XPU hardware and OS requirements](https://github.com/pytorch/pytorch/blob/main/docs/source/notes/get_start_xpu.md)
+list additional Arc and Core Ultra GPU configurations; Intel's
+[compute-runtime device list](https://github.com/intel/compute-runtime) and
+[DPC++ GPU target list](https://intel.github.io/llvm/design/OffloadDesign.html) describe
+lower-level driver and compiler coverage. Those upstream lists identify potential
+platforms, not FreeToken compatibility. Each additional GPU family still needs native
+kernel checks and an end-to-end model run before it can be called validated here.
+
 Install the XPU wheels before building FreeToken. Do not install the NVIDIA `triton`
 wheel into the same environment as `triton-xpu`; both own the `triton` Python package.
 The `xpu` extra deliberately excludes CUDA-only `flashlib`, CUDA Torch, and NVIDIA
