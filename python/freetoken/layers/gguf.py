@@ -22,6 +22,7 @@ from freetoken.models.gguf.dequant import (
     GGML_F32,
     GGML_NAME,
     GGML_Q2_K,
+    GGML_Q3_K,
     GGML_Q4_0,
     GGML_Q4_K,
     GGML_Q6_K,
@@ -47,6 +48,7 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
     if x.device.type == "xpu":
         from freetoken.kernel.sycl.causal_conv1d import (
             q2_k_matvec_sycl,
+            q3_k_matvec_sycl,
             q4_k_matvec_sycl,
             q8_0_matvec_sycl,
         )
@@ -55,6 +57,8 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
             return q8_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q2_K:
             return q2_k_matvec_sycl(x, qweight)
+        if qweight_type == GGML_Q3_K:
+            return q3_k_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q4_K:
             return q4_k_matvec_sycl(x, qweight)
     if x.device.type != "cuda":
