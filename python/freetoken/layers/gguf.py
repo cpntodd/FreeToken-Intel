@@ -58,6 +58,14 @@ def fused_mul_mat_gguf(
 ) -> torch.Tensor:
     """y = x @ dequant(qweight).T, dispatched by batch size and quant type."""
     if x.device.type == "xpu":
+        if qweight_type in _UNQUANTIZED:
+            from freetoken.models.gguf.dequant import dequantize
+
+            weight = dequantize(qweight, qweight_type, x.dtype).reshape(
+                qweight.shape[0], -1
+            )
+            return x @ weight.T
+
         from freetoken.kernel.sycl.causal_conv1d import (
             iq1_m_matvec_sycl,
             iq1_s_matvec_sycl,

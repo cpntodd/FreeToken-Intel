@@ -82,6 +82,31 @@ def test_sycl_q8_0_matvec_matches_dequantized_reference(dtype, batch):
 
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+@pytest.mark.parametrize(
+    ("ggml_type", "storage_dtype"),
+    [
+        pytest.param(0, torch.float32, id="f32"),
+        pytest.param(1, torch.float16, id="f16"),
+        pytest.param(30, torch.bfloat16, id="bf16"),
+    ],
+)
+def test_xpu_unquantized_gguf_uses_native_matmul(ggml_type, storage_dtype):
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+
+    generator = torch.Generator().manual_seed(307)
+    x_cpu = torch.randn(3, 32, dtype=torch.bfloat16, generator=generator)
+    weight_cpu = torch.randn(7, 32, dtype=storage_dtype, generator=generator)
+    packed = weight_cpu.view(torch.uint8)
+    expected = x_cpu @ weight_cpu.to(torch.bfloat16).T
+
+    actual = fused_mul_mat_gguf(x_cpu.to("xpu"), packed.to("xpu"), ggml_type)
+    torch.xpu.synchronize()
+
+    assert actual.device.type == "xpu"
+    torch.testing.assert_close(actual.cpu(), expected, rtol=5e-2, atol=5e-2)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("batch", [1, 3, 4, 5, 6])
 def test_sycl_q4_0_matvec_matches_dequantized_reference(dtype, batch):
