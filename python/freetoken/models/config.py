@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Dict, List, Literal, Tuple, TypeAlias
 
 from freetoken.attention.base import AttnType
@@ -245,6 +245,36 @@ class SlotStateSpec:
     fill_value: float = 0.0
 
 
+@dataclass
+class GGUFHadamardConfig:
+    """Validated activation transforms declared by a Prism GGUF checkpoint."""
+
+    block_size: int
+    weight_names: frozenset[str]
+    inverse_weight_names: frozenset[str]
+    signs_by_width: dict[int, tuple[int, ...]]
+    gdn_v_grouped: bool = False
+    _device_sign_cache: dict[tuple[int, str], Any] = field(
+        default_factory=dict, init=False, repr=False
+    )
+
+    def signs_on(self, width: int, device) -> Any:
+        try:
+            values = self.signs_by_width[width]
+        except KeyError as error:
+            raise ValueError(
+                f"no Prism Hadamard signs are declared for width {width}"
+            ) from error
+        key = (width, str(device))
+        signs = self._device_sign_cache.get(key)
+        if signs is None:
+            import torch
+
+            signs = torch.tensor(values, dtype=torch.float32, device=device)
+            self._device_sign_cache[key] = signs
+        return signs
+
+
 @dataclass(frozen=True)
 class ModelConfig:
     num_layers: int
@@ -321,6 +351,8 @@ class ModelConfig:
     # Per-source tensor GGML types for mixed-quant GGUF models. Unlike the two
     # homogeneous fields above, this preserves the format of every packed projection.
     gguf_tensor_types: dict[str, int] | None = None
+    # Validated Prism activation transforms for GGUF weights; None for ordinary GGUF.
+    gguf_hadamard: GGUFHadamardConfig | None = None
     swiglu_limit: float | None = None
     hidden_act_alpha: float = 1.702
     # Full DeepseekV4Args payload for the DSV4-specific machinery (MLA sparse attention,

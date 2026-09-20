@@ -4,7 +4,7 @@ import torch
 
 
 def hadamard_transform_sycl(
-    x: torch.Tensor, signs: torch.Tensor, block_size: int
+    x: torch.Tensor, signs: torch.Tensor, block_size: int, *, inverse: bool = False
 ) -> torch.Tensor:
     try:
         from freetoken.kernel import _sycl_kernels
@@ -13,7 +13,7 @@ def hadamard_transform_sycl(
             "the native SYCL extension is not installed; rebuild with "
             "FREETOKEN_ACCELERATOR=xpu and the oneAPI icpx compiler"
         ) from error
-    return _sycl_kernels.hadamard_transform(x, signs, block_size)
+    return _sycl_kernels.hadamard_transform(x, signs, block_size, inverse)
 
 
 def causal_conv1d_decode_sycl(

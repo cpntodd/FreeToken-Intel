@@ -201,6 +201,73 @@ def fused_mul_mat_gguf(
     )
 
 
+def _hadamard_transform_torch(
+    x: torch.Tensor, signs: torch.Tensor, block_size: int, *, inverse: bool
+) -> torch.Tensor:
+    shape = x.shape
+    width = shape[-1]
+    values = x.float().reshape(-1, width).clone()
+    signs = signs.float().reshape(1, width)
+    if not inverse:
+        values = values * signs
+    values = values.reshape(-1, block_size)
+    stride = 1
+    while stride < block_size:
+        groups = values.view(-1, block_size // (2 * stride), 2, stride)
+        left = groups[:, :, 0, :].clone()
+        right = groups[:, :, 1, :].clone()
+        groups[:, :, 0, :] = left + right
+        groups[:, :, 1, :] = left - right
+        stride *= 2
+    values = values.reshape(-1, width) / block_size**0.5
+    if inverse:
+        values = values * signs
+    return values.reshape(shape).to(x.dtype)
+
+
+def _apply_hadamard_transform(
+    x: torch.Tensor,
+    hadamard_config,
+    weight_name: str,
+    *,
+    inverse: bool = False,
+    gdn_permutation: tuple[int, int, int] | None = None,
+) -> torch.Tensor:
+    names = (
+        hadamard_config.inverse_weight_names
+        if inverse
+        else hadamard_config.weight_names
+    )
+    if weight_name not in names:
+        return x
+
+    shape = x.shape
+    width = shape[-1]
+    if gdn_permutation is not None:
+        key_heads, repeat, head_dim = gdn_permutation
+        x = (
+            x.reshape(-1, repeat, key_heads, head_dim)
+            .transpose(1, 2)
+            .contiguous()
+            .reshape(-1, width)
+        )
+    else:
+        x = x.reshape(-1, width).contiguous()
+
+    signs = hadamard_config.signs_on(width, x.device)
+    if x.device.type == "xpu":
+        from freetoken.kernel.sycl.causal_conv1d import hadamard_transform_sycl
+
+        result = hadamard_transform_sycl(
+            x, signs, hadamard_config.block_size, inverse=inverse
+        )
+    else:
+        result = _hadamard_transform_torch(
+            x, signs, hadamard_config.block_size, inverse=inverse
+        )
+    return result.reshape(shape)
+
+
 class GGUFLinear(BaseOP):
     """Linear whose weight is a native GGUF block-quantized ``[out, row_bytes]`` tensor."""
 
@@ -210,16 +277,30 @@ class GGUFLinear(BaseOP):
         out_features: int,
         quant_type: int,
         has_bias: bool = False,
+        *,
+        hadamard_config=None,
+        hadamard_weight_name: str | None = None,
+        hadamard_permutation: tuple[int, int, int] | None = None,
     ):
         self.in_features = in_features
         self.out_features = out_features
         self._quant_type = quant_type
+        self._hadamard_config = hadamard_config
+        self._hadamard_weight_name = hadamard_weight_name
+        self._hadamard_permutation = hadamard_permutation
         self.qweight = torch.empty(
             out_features, row_bytes(in_features, quant_type), dtype=torch.uint8
         )
         self.bias = torch.empty(out_features) if has_bias else None
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        if self._hadamard_config is not None and self._hadamard_weight_name is not None:
+            x = _apply_hadamard_transform(
+                x,
+                self._hadamard_config,
+                self._hadamard_weight_name,
+                gdn_permutation=self._hadamard_permutation,
+            )
         out = fused_mul_mat_gguf(x, self.qweight, self._quant_type)
         if self.bias is not None:
             out = out + self.bias
@@ -229,11 +310,30 @@ class GGUFLinear(BaseOP):
 class GGUFMergedLinear(BaseOP):
     """Logical fused projection backed by independently quantized GGUF sources."""
 
-    def __init__(self, in_features: int, parts: list[tuple[int, int]]):
+    def __init__(
+        self,
+        in_features: int,
+        parts: list[tuple[int, int]],
+        *,
+        hadamard_config=None,
+        hadamard_weight_names: list[str] | None = None,
+    ):
+        if hadamard_weight_names is not None and len(hadamard_weight_names) != len(parts):
+            raise ValueError("Hadamard weight names must match merged projection parts")
         self.parts = OPList(
             [
-                GGUFLinear(in_features, out_features, quant_type)
-                for out_features, quant_type in parts
+                GGUFLinear(
+                    in_features,
+                    out_features,
+                    quant_type,
+                    hadamard_config=hadamard_config,
+                    hadamard_weight_name=(
+                        hadamard_weight_names[index]
+                        if hadamard_weight_names is not None
+                        else None
+                    ),
+                )
+                for index, (out_features, quant_type) in enumerate(parts)
             ]
         )
 
@@ -254,10 +354,15 @@ class GGUFEmbedding(BaseOP):
         embedding_dim: int,
         quant_type: int,
         embed_scale: float | None = None,
+        *,
+        hadamard_config=None,
+        hadamard_weight_name: str | None = None,
     ):
         self.num_embeddings = num_embeddings
         self.embedding_dim = embedding_dim
         self._quant_type = quant_type
+        self._hadamard_config = hadamard_config
+        self._hadamard_weight_name = hadamard_weight_name
         self.qweight = torch.empty(
             num_embeddings, row_bytes(embedding_dim, quant_type), dtype=torch.uint8
         )
@@ -284,6 +389,13 @@ class GGUFEmbedding(BaseOP):
                 flat.shape[0], self.embedding_dim
             )
         y = y.view(*x.shape, self.embedding_dim)
+        if self._hadamard_config is not None and self._hadamard_weight_name is not None:
+            y = _apply_hadamard_transform(
+                y,
+                self._hadamard_config,
+                self._hadamard_weight_name,
+                inverse=True,
+            )
         if self._embed_scale is not None:
             if self._embed_scale_t is None:
                 self._embed_scale_t = torch.tensor(

@@ -15,8 +15,11 @@ def _reference(x, state, weight, indices):
     return output, expected_state
 
 
-def _hadamard_reference(x, signs, block_size):
-    values = (x.float() * signs.float()).reshape(-1, block_size)
+def _hadamard_reference(x, signs, block_size, *, inverse=False):
+    values = x.float().reshape(-1, x.shape[-1]).clone()
+    if not inverse:
+        values = values * signs.float()
+    values = values.reshape(-1, block_size)
     stride = 1
     while stride < block_size:
         groups = values.view(-1, block_size // (2 * stride), 2, stride)
@@ -25,7 +28,10 @@ def _hadamard_reference(x, signs, block_size):
         groups[:, :, 0, :] = left + right
         groups[:, :, 1, :] = left - right
         stride *= 2
-    return (values / block_size**0.5).reshape_as(x).to(x.dtype)
+    values = values.reshape_as(x) / block_size**0.5
+    if inverse:
+        values = values * signs.float()
+    return values.to(x.dtype)
 
 
 def test_sycl_wrapper_preserves_extension_abi_import_error(monkeypatch):
@@ -46,17 +52,21 @@ def test_sycl_wrapper_preserves_extension_abi_import_error(monkeypatch):
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
 @pytest.mark.parametrize("width", [5120, 6144, 17408])
-def test_sycl_hadamard_transform_matches_reference(dtype, width):
+@pytest.mark.parametrize("inverse", [False, True])
+def test_sycl_hadamard_transform_matches_reference(dtype, width, inverse):
     from freetoken.kernel.sycl.causal_conv1d import hadamard_transform_sycl
 
     generator = torch.Generator().manual_seed(83)
     x_cpu = torch.randn(2, width, dtype=dtype, generator=generator)
     sign_values = torch.randint(0, 2, (width,), generator=generator)
     signs_cpu = sign_values.to(torch.float32).mul_(2).sub_(1)
-    expected = _hadamard_reference(x_cpu, signs_cpu, 1024)
+    expected = _hadamard_reference(x_cpu, signs_cpu, 1024, inverse=inverse)
 
     actual = hadamard_transform_sycl(
-        x_cpu.to("xpu"), signs_cpu.to("xpu"), block_size=1024
+        x_cpu.to("xpu"),
+        signs_cpu.to("xpu"),
+        block_size=1024,
+        inverse=inverse,
     )
     torch.xpu.synchronize()
 

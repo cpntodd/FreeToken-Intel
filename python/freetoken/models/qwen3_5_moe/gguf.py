@@ -11,6 +11,7 @@ import torch
 from freetoken.layers import BaseOP
 from freetoken.models.config import (
     FullAttentionGroupConfig,
+    GGUFHadamardConfig,
     LinearGatedDeltaGroupConfig,
     ModelConfig,
     RotaryConfig,
@@ -20,13 +21,170 @@ if TYPE_CHECKING:
     from freetoken.models.gguf.config import GgufConfigShim
 
 
+_PRISM_HADAMARD_PREFIX = "prism.hadamard."
+_PRISM_HADAMARD_KEYS = {
+    "version",
+    "block_size",
+    "transform",
+    "axis",
+    "sign_mode",
+    "weight_names",
+    "sign_widths",
+    "sign_values",
+    "gdn_v_grouped",
+    "inverse_weight_names",
+}
+_PRISM_HADAMARD_WEIGHT_KINDS = {
+    "attn_q.weight",
+    "attn_k.weight",
+    "attn_v.weight",
+    "attn_qkv.weight",
+    "attn_gate.weight",
+    "attn_output.weight",
+    "ffn_gate.weight",
+    "ffn_up.weight",
+    "ffn_down.weight",
+    "ssm_alpha.weight",
+    "ssm_beta.weight",
+    "ssm_out.weight",
+}
+
+
+def _is_supported_hadamard_weight(name: str, num_layers: int) -> bool:
+    if name == "output.weight":
+        return True
+    parts = name.split(".", 2)
+    if len(parts) != 3 or parts[0] != "blk" or parts[2] not in _PRISM_HADAMARD_WEIGHT_KINDS:
+        return False
+    try:
+        layer_id = int(parts[1])
+    except ValueError:
+        return False
+    return 0 <= layer_id < num_layers
+
+
+def _parse_prism_hadamard(
+    metadata: dict,
+    tensor_types: dict[str, int] | None,
+    num_layers: int,
+    tie_word_embeddings: bool,
+) -> GGUFHadamardConfig | None:
+    keys = {key for key in metadata if key.startswith(_PRISM_HADAMARD_PREFIX)}
+    if not keys:
+        return None
+    suffixes = {key.removeprefix(_PRISM_HADAMARD_PREFIX) for key in keys}
+    unknown = suffixes - _PRISM_HADAMARD_KEYS
+    if unknown:
+        raise NotImplementedError(
+            f"unsupported Prism Hadamard metadata keys: {sorted(unknown)}"
+        )
+
+    def required(name: str):
+        key = f"{_PRISM_HADAMARD_PREFIX}{name}"
+        if key not in metadata:
+            raise ValueError(f"incomplete Prism Hadamard metadata: missing {key}")
+        return metadata[key]
+
+    version = int(required("version"))
+    if version != 1:
+        raise NotImplementedError(f"unsupported Prism Hadamard version {version}")
+    block_size = int(required("block_size"))
+    if block_size < 2 or block_size > 1024 or block_size & (block_size - 1):
+        raise ValueError(
+            "Prism Hadamard block_size must be a power of two from 2 through 1024"
+        )
+    transform = required("transform")
+    if transform != "normalized-sylvester-walsh-hadamard":
+        raise NotImplementedError(f"unsupported Prism Hadamard transform {transform!r}")
+    axis = required("axis")
+    if axis != "input-last-dimension":
+        raise NotImplementedError(f"unsupported Prism Hadamard axis {axis!r}")
+    sign_mode = required("sign_mode")
+    if sign_mode != "explicit":
+        raise NotImplementedError(
+            f"unsupported Prism Hadamard sign mode {sign_mode!r}; explicit signs are required"
+        )
+
+    raw_names = required("weight_names")
+    if not isinstance(raw_names, (list, tuple)) or not raw_names:
+        raise ValueError("Prism Hadamard weight_names must be a non-empty array")
+    weight_names = tuple(raw_names)
+    if any(not isinstance(name, str) for name in weight_names):
+        raise ValueError("Prism Hadamard weight_names must contain strings")
+    if len(set(weight_names)) != len(weight_names):
+        raise ValueError("Prism Hadamard weight_names contains duplicates")
+    unsupported = [
+        name for name in weight_names if not _is_supported_hadamard_weight(name, num_layers)
+    ]
+    if unsupported:
+        raise NotImplementedError(
+            "Prism Hadamard weights are not wired to verified Qwen3.5 GGUF paths: "
+            f"{unsupported[:4]}"
+        )
+    if tensor_types is not None:
+        missing = set(weight_names) - tensor_types.keys()
+        if missing:
+            raise ValueError(
+                "Prism Hadamard weight_names reference missing GGUF tensors: "
+                f"{sorted(missing)[:4]}"
+            )
+
+    raw_inverse_names = metadata.get(f"{_PRISM_HADAMARD_PREFIX}inverse_weight_names", [])
+    if not isinstance(raw_inverse_names, (list, tuple)):
+        raise ValueError("Prism Hadamard inverse_weight_names must be an array")
+    inverse_names = tuple(raw_inverse_names)
+    if any(name != "token_embd.weight" for name in inverse_names):
+        raise NotImplementedError(
+            "Prism Hadamard inverse transforms are supported only for token_embd.weight"
+        )
+    if len(set(inverse_names)) != len(inverse_names):
+        raise ValueError("Prism Hadamard inverse_weight_names contains duplicates")
+    if set(weight_names) & set(inverse_names):
+        raise ValueError("a GGUF tensor cannot use both forward and inverse Hadamard paths")
+    if tie_word_embeddings and "token_embd.weight" in inverse_names:
+        raise NotImplementedError(
+            "Prism Hadamard inverse token embeddings with a tied LM head are not supported"
+        )
+    if tensor_types is not None and set(inverse_names) - tensor_types.keys():
+        raise ValueError("Prism Hadamard inverse_weight_names references a missing GGUF tensor")
+
+    raw_widths = required("sign_widths")
+    raw_signs = required("sign_values")
+    if not isinstance(raw_widths, (list, tuple)) or not raw_widths:
+        raise ValueError("explicit Prism Hadamard sign_widths must be a non-empty array")
+    if not isinstance(raw_signs, (list, tuple)):
+        raise ValueError("explicit Prism Hadamard sign_values must be an array")
+    widths = tuple(int(width) for width in raw_widths)
+    if len(set(widths)) != len(widths) or any(
+        width <= 0 or width % block_size for width in widths
+    ):
+        raise ValueError("Prism Hadamard sign widths must be unique positive block multiples")
+    if len(raw_signs) != sum(widths):
+        raise ValueError("Prism Hadamard sign_values length does not match sign_widths")
+
+    signs_by_width: dict[int, tuple[int, ...]] = {}
+    offset = 0
+    for width in widths:
+        values = raw_signs[offset : offset + width]
+        if any(value not in (-1, 1) for value in values):
+            raise ValueError("Prism Hadamard sign values must be +/-1")
+        signs_by_width[width] = tuple(int(value) for value in values)
+        offset += width
+
+    gdn_v_grouped = metadata.get(f"{_PRISM_HADAMARD_PREFIX}gdn_v_grouped", False)
+    if not isinstance(gdn_v_grouped, bool):
+        raise ValueError("Prism Hadamard gdn_v_grouped must be boolean")
+    return GGUFHadamardConfig(
+        block_size=block_size,
+        weight_names=frozenset(weight_names),
+        inverse_weight_names=frozenset(inverse_names),
+        signs_by_width=signs_by_width,
+        gdn_v_grouped=gdn_v_grouped,
+    )
+
+
 def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
     metadata = shim.metadata
-    if any(key.startswith("prism.hadamard.") for key in metadata):
-        raise NotImplementedError(
-            "Prism Hadamard-transformed GGUF weights are not supported; "
-            "use a non-transformed checkpoint or a Prism-compatible runtime"
-        )
 
     def get(key: str):
         value = metadata.get(f"qwen35.{key}")
@@ -113,6 +271,10 @@ def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
                     continue
             tensor_types[tensor.name] = tensor.ggml_type
 
+    hadamard = _parse_prism_hadamard(
+        metadata, tensor_types, num_layers, shim.tie_word_embeddings
+    )
+
     return ModelConfig(
         num_layers=num_layers,
         num_qo_heads=num_heads,
@@ -134,6 +296,7 @@ def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
         moe_enabled=False,
         use_qk_norm=True,
         gguf_tensor_types=tensor_types,
+        gguf_hadamard=hadamard,
         attention_groups=tuple(
             sorted(
                 (full_group, linear_group),
@@ -148,10 +311,24 @@ def is_gguf_model(config: ModelConfig) -> bool:
 
 
 class GGUFUntiedLMHead(BaseOP):
-    def __init__(self, in_features: int, out_features: int, quant_type: int):
+    def __init__(
+        self,
+        in_features: int,
+        out_features: int,
+        quant_type: int,
+        *,
+        hadamard_config: GGUFHadamardConfig | None = None,
+        hadamard_weight_name: str = "output.weight",
+    ):
         from freetoken.layers.gguf import GGUFLinear
 
-        self.proj = GGUFLinear(in_features, out_features, quant_type)
+        self.proj = GGUFLinear(
+            in_features,
+            out_features,
+            quant_type,
+            hadamard_config=hadamard_config,
+            hadamard_weight_name=hadamard_weight_name,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         from freetoken.core import get_global_ctx
@@ -198,60 +375,131 @@ def _type(config: ModelConfig, name: str) -> int:
 
 def convert_qwen35_to_gguf(model, config: ModelConfig) -> None:
     """Replace every large dense projection with its native per-tensor GGUF form."""
-    from freetoken.layers.gguf import GGUFEmbedding, GGUFLinear, GGUFMergedLinear
+    from freetoken.layers.gguf import GGUFEmbedding
 
     assert config.gguf_tensor_types is not None
     inner = model.model
+
+    hadamard = config.gguf_hadamard
+    transformed_weights: set[str] = set()
+
+    def merged(in_features: int, parts: list[tuple[str, int]]):
+        from freetoken.layers.gguf import GGUFMergedLinear
+
+        names = [name for name, _ in parts]
+        if hadamard is not None:
+            for name, _ in parts:
+                if name in hadamard.weight_names:
+                    if in_features not in hadamard.signs_by_width:
+                        raise ValueError(
+                            f"Prism Hadamard signs do not cover {name} input width "
+                            f"{in_features}"
+                        )
+                    transformed_weights.add(name)
+        return GGUFMergedLinear(
+            in_features,
+            [(out_features, _type(config, name)) for name, out_features in parts],
+            hadamard_config=hadamard,
+            hadamard_weight_names=names,
+        )
+
+    def linear(
+        name: str,
+        in_features: int,
+        out_features: int,
+        *,
+        permutation: tuple[int, int, int] | None = None,
+    ):
+        from freetoken.layers.gguf import GGUFLinear
+
+        if hadamard is not None and name in hadamard.weight_names:
+            if in_features not in hadamard.signs_by_width:
+                raise ValueError(
+                    f"Prism Hadamard signs do not cover {name} input width {in_features}"
+                )
+            transformed_weights.add(name)
+        return GGUFLinear(
+            in_features,
+            out_features,
+            _type(config, name),
+            hadamard_config=hadamard,
+            hadamard_weight_name=name,
+            hadamard_permutation=permutation,
+        )
+
+    if (
+        hadamard is not None
+        and "token_embd.weight" in hadamard.inverse_weight_names
+        and config.hidden_size not in hadamard.signs_by_width
+    ):
+        raise ValueError(
+            "Prism Hadamard signs do not cover token_embd.weight feature width "
+            f"{config.hidden_size}"
+        )
     inner.embed_tokens = GGUFEmbedding(
-        config.vocab_size, config.hidden_size, _type(config, "token_embd.weight")
+        config.vocab_size,
+        config.hidden_size,
+        _type(config, "token_embd.weight"),
+        hadamard_config=hadamard,
+        hadamard_weight_name="token_embd.weight",
     )
 
     for layer_id, layer in enumerate(inner.layers.op_list):
         prefix = f"blk.{layer_id}"
         if layer._is_linear:
             op = layer.linear_attn
-            op.in_proj = GGUFMergedLinear(
+            op.in_proj = merged(
                 config.hidden_size,
                 [
-                    (op.conv_dim, _type(config, f"{prefix}.attn_qkv.weight")),
-                    (op.value_dim, _type(config, f"{prefix}.attn_gate.weight")),
-                    (op.num_v_heads, _type(config, f"{prefix}.ssm_beta.weight")),
-                    (op.num_v_heads, _type(config, f"{prefix}.ssm_alpha.weight")),
+                    (f"{prefix}.attn_qkv.weight", op.conv_dim),
+                    (f"{prefix}.attn_gate.weight", op.value_dim),
+                    (f"{prefix}.ssm_beta.weight", op.num_v_heads),
+                    (f"{prefix}.ssm_alpha.weight", op.num_v_heads),
                 ],
             )
-            op.out_proj = GGUFLinear(
+            permutation = None
+            if hadamard is not None and hadamard.gdn_v_grouped:
+                group = config.linear_attention_group()
+                assert group is not None
+                permutation = (
+                    group.num_key_heads,
+                    group.num_value_heads // group.num_key_heads,
+                    group.value_head_dim,
+                )
+            op.out_proj = linear(
+                f"{prefix}.ssm_out.weight",
                 op.value_dim,
                 config.hidden_size,
-                _type(config, f"{prefix}.ssm_out.weight"),
+                permutation=permutation,
             )
             op.gguf_tiled_v = True
         else:
             op = layer.self_attn
-            op.qkv_proj = GGUFMergedLinear(
+            op.qkv_proj = merged(
                 config.hidden_size,
                 [
-                    (op._qkv_split[0], _type(config, f"{prefix}.attn_q.weight")),
-                    (op._qkv_split[1], _type(config, f"{prefix}.attn_k.weight")),
-                    (op._qkv_split[2], _type(config, f"{prefix}.attn_v.weight")),
+                    (f"{prefix}.attn_q.weight", op._qkv_split[0]),
+                    (f"{prefix}.attn_k.weight", op._qkv_split[1]),
+                    (f"{prefix}.attn_v.weight", op._qkv_split[2]),
                 ],
             )
-            op.o_proj = GGUFLinear(
+            op.o_proj = linear(
+                f"{prefix}.attn_output.weight",
                 op.qo_attn_dim,
                 config.hidden_size,
-                _type(config, f"{prefix}.attn_output.weight"),
             )
 
-        layer.mlp.gate_up_proj = GGUFMergedLinear(
+        layer.mlp.gate_up_proj = merged(
             config.hidden_size,
             [
-                (config.intermediate_size, _type(config, f"{prefix}.ffn_gate.weight")),
-                (config.intermediate_size, _type(config, f"{prefix}.ffn_up.weight")),
+                (f"{prefix}.ffn_gate.weight", config.intermediate_size),
+                (f"{prefix}.ffn_up.weight", config.intermediate_size),
             ],
         )
-        layer.mlp.down_proj = GGUFLinear(
+        layer.mlp.down_proj = linear(
+            f"{prefix}.ffn_down.weight",
             config.intermediate_size,
             config.hidden_size,
-            _type(config, f"{prefix}.ffn_down.weight"),
         )
 
     if config.tie_word_embeddings:
@@ -260,8 +508,24 @@ def convert_qwen35_to_gguf(model, config: ModelConfig) -> None:
         )
     else:
         model.lm_head = GGUFUntiedLMHead(
-            config.hidden_size, config.vocab_size, _type(config, "output.weight")
+            config.hidden_size,
+            config.vocab_size,
+            _type(config, "output.weight"),
+            hadamard_config=hadamard,
+            hadamard_weight_name="output.weight",
         )
+        if hadamard is not None and "output.weight" in hadamard.weight_names:
+            if config.hidden_size not in hadamard.signs_by_width:
+                raise ValueError("Prism Hadamard signs do not cover output.weight")
+            transformed_weights.add("output.weight")
+
+    if hadamard is not None:
+        missing = hadamard.weight_names - transformed_weights
+        if missing:
+            raise ValueError(
+                "Prism Hadamard weights were not attached to a Qwen3.5 projection: "
+                f"{sorted(missing)[:4]}"
+            )
 
 
 _DENSE_MAP = {

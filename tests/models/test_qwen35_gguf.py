@@ -1,3 +1,6 @@
+from dataclasses import replace
+from types import SimpleNamespace
+
 import pytest
 import torch
 from freetoken.models.gguf.config import GgufConfigShim
@@ -37,6 +40,23 @@ def _shim(**overrides):
     )
 
 
+def _hadamard_metadata(**overrides):
+    metadata = {
+        "prism.hadamard.version": 1,
+        "prism.hadamard.block_size": 1024,
+        "prism.hadamard.transform": "normalized-sylvester-walsh-hadamard",
+        "prism.hadamard.axis": "input-last-dimension",
+        "prism.hadamard.sign_mode": "explicit",
+        "prism.hadamard.weight_names": ["blk.0.attn_q.weight"],
+        "prism.hadamard.inverse_weight_names": ["token_embd.weight"],
+        "prism.hadamard.sign_widths": [5120],
+        "prism.hadamard.sign_values": [1] * 5120,
+        "prism.hadamard.gdn_v_grouped": True,
+    }
+    metadata.update(overrides)
+    return metadata
+
+
 def test_qwen38_metadata_excludes_mtp_and_builds_hybrid_groups():
     config = parse_gguf_config(_shim())
 
@@ -65,10 +85,243 @@ def test_qwen35_metadata_rejects_inconsistent_delta_head_geometry():
 
 
 def test_qwen35_metadata_rejects_prism_hadamard_weights():
-    shim = _shim(**{"prism.hadamard.version": 1})
+    metadata = _hadamard_metadata(
+        **{"prism.hadamard.weight_names": ["blk.0.router.weight"]}
+    )
 
-    with pytest.raises(NotImplementedError, match="Hadamard-transformed"):
-        parse_gguf_config(shim)
+    with pytest.raises(NotImplementedError, match="verified Qwen3.5 GGUF paths"):
+        parse_gguf_config(_shim(**metadata))
+
+
+def test_qwen35_metadata_parses_supported_prism_hadamard_contract():
+    shim = _shim(**_hadamard_metadata())
+
+    config = parse_gguf_config(shim)
+
+    assert config.gguf_hadamard is not None
+    assert config.gguf_hadamard.block_size == 1024
+    assert config.gguf_hadamard.weight_names == frozenset({"blk.0.attn_q.weight"})
+    assert config.gguf_hadamard.inverse_weight_names == frozenset({"token_embd.weight"})
+    assert config.gguf_hadamard.gdn_v_grouped
+    assert config.gguf_hadamard.signs_on(5120, "cpu").tolist() == [1] * 5120
+
+
+def test_qwen35_metadata_rejects_incomplete_prism_hadamard_contract():
+    with pytest.raises(ValueError, match="incomplete Prism Hadamard metadata"):
+        parse_gguf_config(_shim(**{"prism.hadamard.version": 1}))
+
+
+def test_qwen35_metadata_rejects_bad_prism_hadamard_sign_vector():
+    metadata = _hadamard_metadata()
+    metadata["prism.hadamard.sign_values"] = [1] * 5119
+
+    with pytest.raises(ValueError, match="length does not match"):
+        parse_gguf_config(_shim(**metadata))
+
+
+def _small_hadamard_reference(x, signs, *, inverse=False):
+    matrix = torch.tensor(
+        [
+            [1, 1, 1, 1],
+            [1, -1, 1, -1],
+            [1, 1, -1, -1],
+            [1, -1, -1, 1],
+        ],
+        dtype=torch.float32,
+    ) / 2
+    values = x.float()
+    if not inverse:
+        values = values * signs
+    values = values.reshape(-1, 4) @ matrix.T
+    if inverse:
+        values = values.reshape_as(x) * signs
+    return values.reshape_as(x).to(x.dtype)
+
+
+def test_qwen35_gguf_linear_applies_only_declared_hadamard_weight(monkeypatch):
+    from freetoken.layers import gguf as gguf_layers
+    from freetoken.layers.gguf import GGUFLinear
+    from freetoken.models.config import GGUFHadamardConfig
+    from freetoken.models.gguf.dequant import GGML_F32
+
+    signs = (1, -1, 1, -1, -1, 1, -1, 1, 1, 1, -1, -1)
+    config = GGUFHadamardConfig(
+        block_size=4,
+        weight_names=frozenset({"blk.0.ffn_down.weight"}),
+        inverse_weight_names=frozenset(),
+        signs_by_width={12: signs},
+    )
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 12)
+    captured = []
+    monkeypatch.setattr(
+        gguf_layers,
+        "fused_mul_mat_gguf",
+        lambda value, _weight, _quant_type: captured.append(value.clone()) or value,
+    )
+    selected = GGUFLinear(
+        12,
+        1,
+        GGML_F32,
+        hadamard_config=config,
+        hadamard_weight_name="blk.0.ffn_down.weight",
+    )
+    unselected = GGUFLinear(
+        12,
+        1,
+        GGML_F32,
+        hadamard_config=config,
+        hadamard_weight_name="blk.0.ffn_up.weight",
+    )
+
+    selected.forward(x)
+    unselected.forward(x)
+
+    sign_tensor = torch.tensor(signs, dtype=torch.float32)
+    torch.testing.assert_close(
+        captured[0], _small_hadamard_reference(x, sign_tensor)
+    )
+    torch.testing.assert_close(captured[1], x)
+
+
+def test_qwen35_gguf_linear_applies_grouped_gdn_permutation_before_hadamard(
+    monkeypatch,
+):
+    from freetoken.layers import gguf as gguf_layers
+    from freetoken.layers.gguf import GGUFLinear
+    from freetoken.models.config import GGUFHadamardConfig
+    from freetoken.models.gguf.dequant import GGML_F32
+
+    name = "blk.0.ssm_out.weight"
+    signs = (1, -1, 1, -1, -1, 1, -1, 1, 1, 1, -1, -1)
+    config = GGUFHadamardConfig(
+        block_size=4,
+        weight_names=frozenset({name}),
+        inverse_weight_names=frozenset(),
+        signs_by_width={12: signs},
+        gdn_v_grouped=True,
+    )
+    x = torch.arange(24, dtype=torch.float32).reshape(2, 12)
+    captured = []
+    monkeypatch.setattr(
+        gguf_layers,
+        "fused_mul_mat_gguf",
+        lambda value, _weight, _quant_type: captured.append(value.clone()) or value,
+    )
+    layer = GGUFLinear(
+        12,
+        1,
+        GGML_F32,
+        hadamard_config=config,
+        hadamard_weight_name=name,
+        hadamard_permutation=(2, 3, 2),
+    )
+
+    layer.forward(x)
+
+    grouped = x.reshape(-1, 3, 2, 2).transpose(1, 2).contiguous().reshape(-1, 12)
+    expected = _small_hadamard_reference(grouped, torch.tensor(signs).float())
+    torch.testing.assert_close(captured[0], expected)
+
+
+def test_qwen35_gguf_embedding_applies_inverse_hadamard_after_lookup(monkeypatch):
+    from freetoken.layers.gguf import GGUFEmbedding
+    from freetoken.models.config import GGUFHadamardConfig
+    from freetoken.models.gguf import dequant
+    from freetoken.models.gguf.dequant import GGML_F32
+
+    signs = (1, -1, 1, -1, -1, 1, -1, 1, 1, 1, -1, -1)
+    config = GGUFHadamardConfig(
+        block_size=4,
+        weight_names=frozenset(),
+        inverse_weight_names=frozenset({"token_embd.weight"}),
+        signs_by_width={12: signs},
+    )
+    embedding = GGUFEmbedding(
+        4,
+        12,
+        GGML_F32,
+        hadamard_config=config,
+        hadamard_weight_name="token_embd.weight",
+    )
+    embedding.qweight[:, 0] = torch.arange(4, dtype=torch.uint8)
+
+    def fake_dequantize(rows, _quant_type, dtype):
+        return (
+            rows[:, :1].float()
+            + torch.arange(12, dtype=torch.float32).unsqueeze(0)
+        ).to(dtype)
+
+    monkeypatch.setattr(dequant, "dequantize", fake_dequantize)
+    token_ids = torch.tensor([1, 3])
+
+    actual = embedding.forward(token_ids)
+
+    latent = fake_dequantize(embedding.qweight[token_ids], GGML_F32, torch.bfloat16)
+    expected = _small_hadamard_reference(
+        latent, torch.tensor(signs).float(), inverse=True
+    )
+    torch.testing.assert_close(actual, expected)
+
+
+def test_convert_qwen35_gguf_attaches_declared_hadamard_paths():
+    from freetoken.models.gguf.dequant import GGML_PQ2_0
+    from freetoken.models.qwen3_5_moe.gguf import convert_qwen35_to_gguf
+
+    weight_names = [
+        "blk.0.attn_qkv.weight",
+        "blk.0.attn_gate.weight",
+        "blk.0.ssm_out.weight",
+        "blk.0.ffn_down.weight",
+        "output.weight",
+    ]
+    metadata = _hadamard_metadata(
+        **{
+            "prism.hadamard.weight_names": weight_names,
+            "prism.hadamard.sign_widths": [5120, 6144, 17408],
+            "prism.hadamard.sign_values": [1] * (5120 + 6144 + 17408),
+        }
+    )
+    config = parse_gguf_config(_shim(**metadata))
+    tensor_names = {
+        "token_embd.weight",
+        "output.weight",
+        "blk.0.attn_qkv.weight",
+        "blk.0.attn_gate.weight",
+        "blk.0.ssm_beta.weight",
+        "blk.0.ssm_alpha.weight",
+        "blk.0.ssm_out.weight",
+        "blk.0.ffn_gate.weight",
+        "blk.0.ffn_up.weight",
+        "blk.0.ffn_down.weight",
+    }
+    config = replace(
+        config,
+        vocab_size=4,
+        gguf_tensor_types={name: GGML_PQ2_0 for name in tensor_names},
+    )
+    linear = SimpleNamespace(conv_dim=10240, value_dim=6144, num_v_heads=48)
+    layer = SimpleNamespace(
+        _is_linear=True,
+        linear_attn=linear,
+        mlp=SimpleNamespace(gate_up_proj=None, down_proj=None),
+    )
+    model = SimpleNamespace(
+        model=SimpleNamespace(
+            embed_tokens=None,
+            layers=SimpleNamespace(op_list=[layer]),
+        ),
+        lm_head=None,
+    )
+
+    convert_qwen35_to_gguf(model, config)
+
+    assert model.model.embed_tokens._hadamard_weight_name == "token_embd.weight"
+    assert linear.in_proj.parts.op_list[0]._hadamard_weight_name == weight_names[0]
+    assert linear.in_proj.parts.op_list[1]._hadamard_weight_name == weight_names[1]
+    assert linear.out_proj._hadamard_weight_name == weight_names[2]
+    assert linear.out_proj._hadamard_permutation == (16, 3, 128)
+    assert layer.mlp.down_proj._hadamard_weight_name == weight_names[3]
+    assert model.lm_head.proj._hadamard_weight_name == weight_names[4]
 
 
 def test_mixed_gguf_linear_keeps_each_projection_in_its_own_quant_format():

@@ -1488,7 +1488,8 @@ torch::Tensor q6_k_matvec(torch::Tensor x, torch::Tensor qweight) {
 template <typename scalar_t>
 void launch_hadamard_transform(const torch::Tensor &x,
                                const torch::Tensor &signs,
-                               torch::Tensor &output, int64_t block_size) {
+                               torch::Tensor &output, int64_t block_size,
+                               bool inverse) {
   constexpr int64_t kWorkgroupSize = 256;
   const int64_t rows = x.size(0);
   const int64_t width = x.size(1);
@@ -1514,8 +1515,8 @@ void launch_hadamard_transform(const torch::Tensor &x,
 
           for (int64_t index = item.get_local_id(0); index < block_size;
                index += kWorkgroupSize) {
-            scratch[index] = static_cast<float>(x_ptr[input_base + index]) *
-                             signs_ptr[feature_base + index];
+            const float value = static_cast<float>(x_ptr[input_base + index]);
+            scratch[index] = inverse ? value : value * signs_ptr[feature_base + index];
           }
           item.barrier(sycl::access::fence_space::local_space);
 
@@ -1536,15 +1537,18 @@ void launch_hadamard_transform(const torch::Tensor &x,
 
           for (int64_t index = item.get_local_id(0); index < block_size;
                index += kWorkgroupSize) {
-            output_ptr[input_base + index] =
-                static_cast<scalar_t>(scratch[index] * normalization);
+            float value = scratch[index] * normalization;
+            if (inverse) {
+              value *= signs_ptr[feature_base + index];
+            }
+            output_ptr[input_base + index] = static_cast<scalar_t>(value);
           }
         });
   });
 }
 
 torch::Tensor hadamard_transform(torch::Tensor x, torch::Tensor signs,
-                                 int64_t block_size) {
+                                 int64_t block_size, bool inverse) {
   TORCH_CHECK(x.device().is_xpu(), "x must be an XPU tensor");
   TORCH_CHECK(signs.device() == x.device(),
               "signs must be on the same XPU device as x");
@@ -1570,10 +1574,10 @@ torch::Tensor hadamard_transform(torch::Tensor x, torch::Tensor signs,
     return output;
   }
   if (x.scalar_type() == torch::kFloat32) {
-    launch_hadamard_transform<float>(x, signs, output, block_size);
+    launch_hadamard_transform<float>(x, signs, output, block_size, inverse);
   } else {
     launch_hadamard_transform<sycl::ext::oneapi::bfloat16>(x, signs, output,
-                                                            block_size);
+                                                            block_size, inverse);
   }
   return output;
 }

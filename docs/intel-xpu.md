@@ -394,10 +394,28 @@ tokens/s); end-to-end output rate was 0.55 tokens/s over 15 returned tokens. The
 EOS is omitted from the returned list. This single cold sample confirms longer XPU
 execution and separate timing, but it is not a steady-state benchmark.
 
-Bonsai 2 additionally declares a block-1024 normalized Walsh-Hadamard transform,
-explicit signs, and grouped GDN values. Registering type 142 alone does not establish
-Bonsai 2 correctness; it remains unsupported until its model-transform handling has
-reference parity. A B580 smoke of `Ternary-Bonsai-2-27B-PQ2_0.gguf` on 2026-09-20
-reached this rejection before model allocation or GPU work: `Prism Hadamard-transformed
-GGUF weights are not supported`. The loader rejects this transform metadata rather than
-silently interpreting it as the classic Bonsai format.
+Bonsai 2 declares a block-1024 normalized Walsh-Hadamard transform, explicit signs,
+inverse token-embedding handling, and grouped GDN values. The Qwen3.5 GGUF loader now
+validates that metadata, verifies all 401 declared projection tensors are present and
+attached to supported paths, applies signed transforms before selected projections,
+restores embedding rows after lookup, and converts grouped GDN values before the
+`ssm_out` transform. Unsupported versions, axes, sign modes, tensor names, and tied
+inverse embeddings still fail closed.
+
+The native SYCL operator has FP32/BF16 parity tests for forward and inverse transforms at
+all three checkpoint widths (5120, 6144, and 17408). Model tests cover projection
+selection, inverse embedding ordering, and the GDN permutation. The complete
+`Ternary-Bonsai-2-27B-PQ2_0.gguf` then loaded and generated on the host Arc B580
+(`xpu:0`, PCI `0xE20B`, driver `1.6.33578+15`, Level Zero V2): a 38.86 s cold load
+produced token IDs `760, 1156, 6587` (`The user wants`) from the benchmark prompt. The
+classic checkpoint produced the same IDs in a separate run. These are short functional
+smokes, not quality or throughput claims; exact logits parity against an independently
+rendered Prism reference prompt remains unverified. Reproduce the transformed-checkpoint
+smoke with:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
+  .venv/bin/python benchmarks/bench_xpu_gemma4.py \
+  /home/oddsoul/models/Ternary-Bonsai-2-27B-PQ2_0.gguf \
+  --max-tokens 4 --context 128 --kv-tokens 256
+```
