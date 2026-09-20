@@ -283,6 +283,28 @@ def parse_args(
     )
 
     parser.add_argument(
+        "--openvino-island",
+        choices=["llama.layer0.qkv"],
+        default=ServerArgs.openvino_island,
+        help=(
+            "Opt in to the bounded OpenVINO GPU island for Llama layer 0 QKV; "
+            "disabled by default and requires the XPU accelerator."
+        ),
+    )
+    parser.add_argument(
+        "--openvino-island-fallback",
+        choices=["none", "xpu"],
+        default=ServerArgs.openvino_island_fallback,
+        help="Failure policy for the selected OpenVINO island; XPU fallback is opt-in.",
+    )
+    parser.add_argument(
+        "--openvino-island-max-tokens",
+        type=_positive_int,
+        default=ServerArgs.openvino_island_max_tokens,
+        help="Maximum tokens per selected OpenVINO island invocation (default: 64).",
+    )
+
+    parser.add_argument(
         "--tensor-parallel-size",
         "--tp-size",
         type=int,

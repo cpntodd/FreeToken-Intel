@@ -136,7 +136,14 @@ class OpenVINODenseIsland:
                 "hidden_states must have shape "
                 f"[tokens, {self.in_features}], got {tuple(hidden_states.shape)}"
             )
-        if not 0 < hidden_states.shape[0] <= self.max_batch_tokens:
+        token_count = hidden_states.shape[0]
+        if token_count > self.max_batch_tokens and self.fallback == "xpu":
+            return self._run_xpu_fallback(
+                hidden_states,
+                f"token count {token_count} exceeds OpenVINO island limit "
+                f"{self.max_batch_tokens}",
+            )
+        if not 0 < token_count <= self.max_batch_tokens:
             raise ValueError(
                 f"token count must be between 1 and {self.max_batch_tokens}"
             )

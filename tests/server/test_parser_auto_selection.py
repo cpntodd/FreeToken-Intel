@@ -94,3 +94,34 @@ def test_an_explicit_choice_beats_inference():
         pinned, _ = parse_args(["--model", ANON_PATH, "--reasoning-parser", "qwen3"])
     assert off.reasoning_parser is None
     assert pinned.reasoning_parser == "qwen3"
+
+
+def test_openvino_island_options_are_default_off_and_explicit():
+    config = _Config({"architectures": ["LlamaForCausalLM"], "torch_dtype": "bfloat16"})
+    with patch("freetoken.utils.cached_load_hf_config", lambda _path: config):
+        default, _ = parse_args(["--model", ANON_PATH])
+        selected, _ = parse_args(
+            [
+                "--model",
+                ANON_PATH,
+                "--openvino-island",
+                "llama.layer0.qkv",
+                "--openvino-island-max-tokens",
+                "32",
+                "--openvino-island-fallback",
+                "xpu",
+            ]
+        )
+        with pytest.raises(
+            ValueError, match="requires an explicitly selected openvino_island"
+        ):
+            parse_args(
+                ["--model", ANON_PATH, "--openvino-island-fallback", "xpu"]
+            )
+
+    assert default.openvino_island is None
+    assert default.openvino_island_fallback == "none"
+    assert default.openvino_island_max_tokens == 64
+    assert selected.openvino_island == "llama.layer0.qkv"
+    assert selected.openvino_island_max_tokens == 32
+    assert selected.openvino_island_fallback == "xpu"

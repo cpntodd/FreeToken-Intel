@@ -360,6 +360,11 @@ class ForwardOutput(NamedTuple):
 class Engine:
     def __init__(self, config: EngineConfig):
         self.runtime = resolve_runtime(config.accelerator)
+        if config.openvino_island is not None:
+            if self.runtime.kind != "xpu":
+                raise ValueError("OpenVINO compute islands currently require accelerator=xpu")
+            if config.tp_info.size != 1:
+                raise ValueError("OpenVINO compute islands currently require tensor parallel size 1")
         object.__setattr__(config, "accelerator", self.runtime.kind)
         assert not self.runtime.is_initialized()
         set_tp_info(rank=config.tp_info.rank, size=config.tp_info.size)
@@ -408,13 +413,17 @@ class Engine:
                 )
             # before the residency snapshot, so streamed blocks are not charged as resident weights
             self.model.place_encoder_weights(config.mm.encoder_weights)
+        if config.openvino_island is not None:
+            self._configure_openvino_island(config)
         post_weights_free = self._sync_get_memory()[0]
         self._weights_bytes = self._baseline_free - post_weights_free
-        # Pool-budget baseline for the desktop cache sliders: free VRAM after the weights are
-        # resident but before ANY runtime cache pool (MoE expert cache below, KV pages, GDN
-        # state) is allocated. This is the stable "if all free VRAM went to one pool" budget —
-        # unlike a query-time mem_get_info it doesn't drift with allocator caching, CUDA
-        # graphs, or other processes. Cross-rank MIN, deterministic across ranks.
+        # Fixed allocations made before this snapshot, including an opt-in OpenVINO graph,
+        # are conservatively charged with the weights so runtime cache sizing cannot spend
+        # that device memory twice. Cross-rank MIN keeps the budget deterministic.
+        # Pool-budget baseline for the desktop cache sliders: free VRAM after these fixed
+        # allocations but before runtime cache pools (MoE expert cache, KV pages, GDN state).
+        # Unlike a query-time mem_get_info it does not drift with allocator caching, CUDA
+        # graphs, or other processes.
         self._post_weights_free = post_weights_free
         self.moe_offload_cache = None
         self.cpu_moe_executor = None
@@ -563,6 +572,48 @@ class Engine:
             tp_cpu_group = torch.distributed.new_group(backend="gloo")
             assert tp_cpu_group is not None
         return tp_cpu_group
+
+    def _configure_openvino_island(self, config: EngineConfig) -> None:
+        if config.openvino_island != "llama.layer0.qkv":
+            raise ValueError(f"unsupported OpenVINO island: {config.openvino_island!r}")
+
+        from freetoken.accelerator.openvino import OpenVINODenseIsland
+        from freetoken.models.llama.model import LlamaForCausalLM
+
+        if not isinstance(self.model, LlamaForCausalLM):
+            raise ValueError("the llama.layer0.qkv island requires a Llama model")
+        attention = self.model.model.layers.op_list[0].self_attn
+        qkv_proj = attention.qkv_proj
+        weight = getattr(qkv_proj, "weight", None)
+        if not isinstance(weight, torch.Tensor) or weight.ndim != 2:
+            raise ValueError(
+                "the llama.layer0.qkv island requires a loaded dense 2-D QKV weight"
+            )
+        if weight.device.type != "xpu":
+            raise ValueError("the llama.layer0.qkv island requires XPU-resident weights")
+
+        island = OpenVINODenseIsland(
+            weight,
+            bias=qkv_proj.bias,
+            max_batch_tokens=config.openvino_island_max_tokens,
+            fallback=config.openvino_island_fallback,
+        )
+        attention.configure_openvino_qkv_island(island)
+        if island.execution_info is None:
+            logger.info_rank0(
+                "OpenVINO island llama.layer0.qkv is enabled with explicit fallback=%s; "
+                "OpenVINO did not compile during initialization",
+                config.openvino_island_fallback,
+            )
+        else:
+            logger.info_rank0(
+                "OpenVINO island llama.layer0.qkv compiled on %s (%s), max_tokens=%d, "
+                "fallback=%s",
+                island.execution_info.full_device_name,
+                ",".join(island.execution_info.execution_devices),
+                config.openvino_island_max_tokens,
+                config.openvino_island_fallback,
+            )
 
     def _load_weights(self, config: EngineConfig) -> None:
         if config.active_encoders and not config.use_dummy_weight and ftw_lacks_vision(config.model_path):

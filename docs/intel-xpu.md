@@ -485,7 +485,7 @@ Run its B580 benchmark with:
 
 ```bash
 PYTHONPATH=python .venv/bin/python benchmarks/bench_openvino_island.py \
-  --source xpu --tokens 32 --hidden-size 1024 --output-size 4096
+  --source xpu --tokens 32 --hidden-size 5120 --output-size 10240
 ```
 
 To measure the opt-in fallback path after an OpenVINO failure, add `--fallback xpu`.
@@ -494,11 +494,47 @@ fallback reason, and backend counts rather than labeling XPU fallback timings as
 OpenVINO timings.
 
 The benchmark compares the complete OpenVINO path, including host staging, with
-source-device eager execution and checks output parity. On the B580, a 32-token
-`5120 -> 10240` projection measured 2.21 ms through the OpenVINO island versus
-0.33 ms for eager XPU (6.6x slower); maximum absolute output error was 0.0078125.
-This is evidence for the current staging cost, not a general OpenVINO-versus-XPU
-performance claim. A zero-copy or larger fused island requires a separate benchmark.
+source-device eager execution and checks output parity. Repeating the 32-token
+`5120 -> 10240` projection on the host B580 with three warmups and 20 iterations
+measured a median
+1.981 ms through the OpenVINO island versus 0.331 ms for eager XPU (5.99x slower);
+maximum absolute output error was 0.0078125. Median input staging, inference, and output
+staging were 0.493 ms, 0.683 ms, and 0.706 ms, respectively. This is evidence for the
+current staging cost, not a general OpenVINO-versus-XPU performance claim. A zero-copy
+or larger fused island requires a separate benchmark.
+
+The serving integration is experimental and limited to the dense
+`model.layers.0.self_attn.qkv_proj` operation in Llama. The GGUF loader materializes
+that weight as dense BF16; the island compiles after model loading, only when explicitly
+selected, and defaults to a 64-token invocation limit with no fallback. A longer prefill
+raises unless XPU fallback is explicitly enabled. To try it on the tested B580:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
+  .venv/bin/python -m freetoken.cli serve \
+    --model-path /home/oddsoul/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+    --accelerator xpu --openvino-island llama.layer0.qkv \
+    --host 127.0.0.1 --port 8787 --text-model-only \
+    --max-output-tokens 8 --max-seq-len-override 128 --num-tokens 256 \
+    --attention-backend torch
+```
+
+Use `--openvino-island-fallback xpu` only when an explicit native-XPU fallback is
+desired. Without it, import, compilation, execution, and over-limit errors propagate.
+The Engine rejects other model families, non-XPU execution, and tensor parallelism.
+During the 2026-09-21 host smoke, startup reported OpenVINO `GPU.0` as Intel Arc B580
+with `max_tokens=64` and `fallback=none`; the 35-token prompt returned `Hello!` with
+three completion tokens. The same request had already returned `Hello!` on the native
+XPU path. This verifies one short functional serving path, not general model quality or
+throughput. Only the B580 has been device-validated; this does not establish coverage
+for every Arc GPU.
+
+An instrumented comparison in the worker used the loaded checkpoint's actual layer-0
+QKV weight and the same 35-token activation for native XPU and OpenVINO. It reported
+`backend=openvino`, no fallback, max absolute output difference `0.0625`, and relative
+L2 difference `0.0015125`. This is a single observed prefill activation, not a general
+numerical-error guarantee. Engine cache sizing snapshots memory after island compilation
+and reserves persistent island allocations together with fixed model memory.
 
 OpenVINO's C++ GPU Remote Tensor API supports USM pointers, but direct ownership-safe
 PyTorch XPU interoperability has not yet been proven in this Python integration. Host
@@ -587,6 +623,13 @@ Vulkan staging copy on this memory type. `median_upload_plus_dispatch_ms` includ
 per-call input write and blocking queue completion, but excludes static weight packing
 and upload (reported separately as `weight_upload_ms`) and any Vulkan-to-PyTorch output
 handoff.
+
+A fresh direct `best` run on the `8x256` by `256x512` shape again selected the B580
+cooperative FP16/FP32 path with an `8x16x16` tile. Across 20 iterations, median dispatch
+was 0.255 ms and median upload-plus-dispatch was 0.255 ms; weight upload was 0.277 ms
+and max absolute error was `8.34e-7`. The host smoke test also passed its explicit B580
+device-ID (`0xE20B`) and parity assertions. This is a single synthetic-operation check,
+not persistent model-weight or serving evidence.
 
 Run this odd-dimension validation-layer smoke:
 

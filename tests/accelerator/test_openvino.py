@@ -224,6 +224,27 @@ def test_openvino_xpu_fallback_rejects_cpu_input():
         island(torch.ones(1, 8))
 
 
+def test_openvino_oversized_input_uses_explicit_xpu_fallback():
+    device = _xpu_device()
+    weight = torch.arange(32, dtype=torch.float32).reshape(4, 8) / 32
+    hidden_states = torch.arange(24, dtype=torch.float32).reshape(3, 8).to(device)
+    island = OpenVINODenseIsland(
+        weight,
+        max_batch_tokens=2,
+        fallback="xpu",
+        core=_CompileFailureCore(),
+    )
+
+    result = island(hidden_states)
+
+    assert result.backend == "xpu"
+    assert "exceeds OpenVINO island limit 2" in result.fallback_reason
+    torch.testing.assert_close(
+        result.output,
+        F.linear(hidden_states.to(torch.float16), weight.to(device, torch.float16)),
+    )
+
+
 def _hide_openvino_import(monkeypatch):
     original_import = builtins.__import__
 

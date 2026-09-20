@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+import pytest
 import torch
+from freetoken.accelerator.openvino import OpenVINOIslandResult
+from freetoken.models.llama.attention import LlamaAttention
 from freetoken.models.llama.gguf import _reverse_rope_permute, parse_gguf_config
 
 
@@ -42,3 +45,40 @@ def test_reverse_rope_permute_restores_hf_row_order():
     restored = _reverse_rope_permute(gguf_rows, num_heads=2)
 
     torch.testing.assert_close(restored, torch.arange(8).reshape(8, 1))
+
+
+def test_llama_qkv_openvino_island_is_opt_in_and_restores_activation_dtype():
+    hidden_states = torch.zeros((2, 8), dtype=torch.bfloat16)
+    island_result = OpenVINOIslandResult(
+        output=torch.ones((2, 12), dtype=torch.float16),
+        input_copy_seconds=0.1,
+        inference_seconds=0.2,
+        output_copy_seconds=0.3,
+    )
+
+    class _Island:
+        def __call__(self, value):
+            assert value is hidden_states
+            return island_result
+
+    attention = object.__new__(LlamaAttention)
+    attention.layer_id = 0
+    attention._openvino_qkv_island = None
+    attention._openvino_fallback_logged = False
+    attention.qkv_proj = SimpleNamespace(forward=lambda _value: torch.zeros(2, 12))
+
+    native = attention._project_qkv(hidden_states)
+    attention.configure_openvino_qkv_island(_Island())
+    accelerated = attention._project_qkv(hidden_states)
+
+    assert native.dtype == torch.float32
+    assert accelerated.dtype == hidden_states.dtype
+    assert attention._openvino_last_result is island_result
+
+
+def test_llama_qkv_openvino_island_rejects_other_layers():
+    attention = object.__new__(LlamaAttention)
+    attention.layer_id = 1
+
+    with pytest.raises(ValueError, match="restricted to Llama layer 0"):
+        attention.configure_openvino_qkv_island(object())

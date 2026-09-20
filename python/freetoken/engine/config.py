@@ -92,10 +92,23 @@ class EngineConfig:
     num_token_override: int | None = None
     # Runtime knobs of the multimodal path; the architecture side (vision_config, mrope) lives in ModelConfig.
     mm: MultimodalConfig = field(default_factory=MultimodalConfig)
+    openvino_island: str | None = None
+    openvino_island_fallback: str = "none"
+    openvino_island_max_tokens: int = 64
 
     def __post_init__(self):
         if self.accelerator not in {"auto", "cuda", "xpu"}:
             raise ValueError("accelerator must be one of: auto, cuda, xpu")
+        if self.openvino_island not in {None, "llama.layer0.qkv"}:
+            raise ValueError("openvino_island must be one of: None, llama.layer0.qkv")
+        if self.openvino_island_fallback not in {"none", "xpu"}:
+            raise ValueError("openvino_island_fallback must be one of: none, xpu")
+        if self.openvino_island_max_tokens <= 0:
+            raise ValueError("openvino_island_max_tokens must be positive")
+        if self.openvino_island is None and self.openvino_island_fallback != "none":
+            raise ValueError(
+                "openvino_island_fallback requires an explicitly selected openvino_island"
+            )
         if self.accelerator == "xpu" and self.tp_info.size != 1:
             raise ValueError(
                 "the XPU backend currently supports single-GPU inference only"
