@@ -93,7 +93,7 @@ def fused_mul_mat_gguf(
             q8_0_matvec_sycl,
         )
 
-        # Keep prompt batches on the measured XPU matmul path; SYCL is for decode.
+        # Keep these five SYCL paths decode-only; leave prompt batches on XPU matmul.
         if qweight_type == GGML_Q4_0 and x.shape[0] == 1:
             return q4_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q4_1 and x.shape[0] == 1:
