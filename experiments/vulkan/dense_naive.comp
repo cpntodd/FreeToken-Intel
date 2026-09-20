@@ -22,7 +22,7 @@ void main() {
     float sum = 0.0;
     for (uint k = 0; k < dims.input_size; ++k) {
         sum += input_data.values[row * dims.input_size + k]
-            * weight_data.values[k * dims.output_size + column];
+            * weight_data.values[column * dims.input_size + k];
     }
     output_data.values[row * dims.output_size + column] = sum;
 }

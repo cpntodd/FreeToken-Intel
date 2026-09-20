@@ -252,22 +252,51 @@ it is not a CPU fallback or a failed OpenVINO GPU compilation.
 
 ## Vulkan prototype
 
-`experiments/vulkan` contains a deliberately isolated Vulkan compute prototype. It
-compiles a GLSL dense-matrix shader to SPIR-V, selects only an Intel discrete GPU
-(`vendorID=0x8086`), dispatches an 8x256 by 512 FP32 matrix multiplication, and checks
-the result against a CPU reference. It will fail instead of selecting llvmpipe or
-another software device.
+`experiments/vulkan` contains an isolated dense compute benchmark; it does not alter
+serving dispatch. It selects only an Intel discrete Vulkan compute device (`vendorID`
+`0x8086`) and fails rather than using llvmpipe. Three paths can be compared: the
+original row-major FP32 shader, a transposed-weight FP32 shader, and an optional
+`VK_KHR_cooperative_matrix` shader. The cooperative path is enabled only when the
+runtime reports a compatible FP16-input/FP32-accumulator subgroup tuple, the required
+Vulkan 1.1/1.2 features are enabled, and `glslc` successfully builds the shader.
+Otherwise `best` uses the measured FP32 baseline.
+
+Buffers prefer memory that is both `DEVICE_LOCAL` and `HOST_VISIBLE`; the current
+B580 selects memory type 3, backed by its device-local heap and also host coherent. On a
+device without coherent host-visible memory, the probe flushes uploads and invalidates
+the mapped output. This is Vulkan-owned mapped memory, not a proven shared allocation
+with PyTorch XPU. The cooperative probe pads row, input, and output dimensions to the
+queried matrix tile and validates against a CPU FP32 reference using the same FP16
+rounded inputs and weights.
 
 ```bash
-bash experiments/vulkan/run_probe.sh
+bash experiments/vulkan/run_probe.sh both 8 256 512 20
+bash experiments/vulkan/run_probe.sh best 1 1024 4096 10
 ```
 
-This proves native Vulkan compute on the B580 while keeping the experiment outside the
-serving hot path. Host-visible Vulkan buffers still imply an explicit interoperability
-boundary with PyTorch XPU, and the naive shader is a correctness probe rather than a
-production GEMM. Promotion into a `KernelProvider` requires device-local tiled kernels,
-reusable pipelines/descriptors, and measured transfer amortization over a substantially
-larger compute island.
+On the host Arc B580 (device `0xE20B`, Mesa 25.0.7), the runtime reports a subgroup
+cooperative-matrix tile of `8x16x16` for FP16 inputs with FP32 accumulation. For
+`8x256` by `256x512` over 20 warmed iterations, median blocking dispatch was 0.335 ms
+for naive FP32, 0.417 ms for transposed FP32, and 0.246 ms for cooperative FP16. For
+`1x1024` by `1024x4096` over 10 iterations, medians were 0.761 ms naive, 0.867 ms
+transposed, and 0.254 ms cooperative; maximum error against the FP16-rounded reference
+was `5.96e-8`. These small synthetic probes show the cooperative path is promising on
+this B580, not a general Vulkan-vs-XPU result. The host-visible mapped buffers avoid a
+Vulkan staging copy on this memory type. `median_upload_plus_dispatch_ms` includes the
+per-call input write and blocking queue completion, but excludes static weight packing
+and upload (reported separately as `weight_upload_ms`) and any Vulkan-to-PyTorch output
+handoff.
+
+Run this odd-dimension validation-layer smoke:
+
+```bash
+VK_INSTANCE_LAYERS=VK_LAYER_KHRONOS_validation \
+  bash experiments/vulkan/run_probe.sh best 5 255 513 4
+```
+
+Serving integration remains gated on architecture review; it still needs
+reusable pipelines, long-lived model-weight ownership, PyTorch/XPU interoperability,
+batching, and measurements that include all transfer and synchronization costs.
 
 ## Bonsai PQ2_0 compatibility
 
