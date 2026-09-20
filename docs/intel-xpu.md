@@ -141,6 +141,11 @@ enumerated. This makes missing drivers and device-property errors visible even w
 backend still works. If no accelerator is found, the command reports that directly; it does
 not select a CPU inference fallback.
 
+For an XPU device, each device record also includes an `engine` capability object. It reports
+the FreeToken constraints separately from Level Zero features: single-GPU eager dense inference,
+the portable `torch` attention backend, and the current lack of routed-MoE and CUDA-graph
+support. The human-readable report prints the same engine limits below the device runtime data.
+
 ## Native SYCL kernels
 
 The XPU build includes a native SYCL extension for the causal depthwise convolution

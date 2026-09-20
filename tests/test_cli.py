@@ -64,6 +64,9 @@ def test_devices_command_displays_device_and_runtime_features(
     assert "Driver: 1.6.test" in output
     assert "Platform: Level Zero" in output
     assert "Graph capture: no" in output
+    assert "Engine: single-GPU eager dense inference" in output
+    assert "Engine attention: torch" in output
+    assert "Engine routed MoE: no" in output
 
 
 def test_devices_command_json_is_machine_readable(monkeypatch, capsys) -> None:
@@ -77,6 +80,13 @@ def test_devices_command_json_is_machine_readable(monkeypatch, capsys) -> None:
     assert device["name"] == "Intel Arc B580"
     assert device["total_memory"] == 12 * 1024**3
     assert device["platform_name"] == "Level Zero"
+    assert device["engine"] == {
+        "attention_backends": ["torch"],
+        "cuda_graphs": False,
+        "eager_only": True,
+        "routed_moe": False,
+        "single_gpu_only": True,
+    }
     assert report["backends"] == [
         {
             "device_count": 0,

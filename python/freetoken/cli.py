@@ -72,6 +72,19 @@ Use --json for machine-readable output.""",
     )
 
 
+def _engine_capabilities(kind: str) -> dict[str, object] | None:
+    """FreeToken engine limits distinct from the selected runtime's API features."""
+    if kind != "xpu":
+        return None
+    return {
+        "single_gpu_only": True,
+        "eager_only": True,
+        "attention_backends": ["torch"],
+        "routed_moe": False,
+        "cuda_graphs": False,
+    }
+
+
 def _run_devices(argv: list[str]) -> int:
     if argv in (["-h"], ["--help"]):
         _print_devices_help(sys.stdout)
@@ -90,7 +103,12 @@ def _run_devices(argv: list[str]) -> int:
     devices = discovery.devices
     if argv == ["--json"]:
         records = [
-            asdict(capability) | {"device": capability.device} for capability in devices
+            asdict(capability)
+            | {
+                "device": capability.device,
+                "engine": _engine_capabilities(capability.kind),
+            }
+            for capability in devices
         ]
         print(
             json.dumps(
@@ -117,6 +135,11 @@ def _run_devices(argv: list[str]) -> int:
             print(f"  Streams: {'yes' if capability.streams else 'no'}")
             print(f"  Events: {'yes' if capability.events else 'no'}")
             print(f"  Graph capture: {'yes' if capability.graph_capture else 'no'}")
+            engine = _engine_capabilities(capability.kind)
+            if engine is not None:
+                print("  Engine: single-GPU eager dense inference")
+                print("  Engine attention: torch")
+                print("  Engine routed MoE: no")
 
     print("Backend status:")
     for backend in discovery.backends:
