@@ -398,14 +398,17 @@ present only in the MTP layer that serving currently omits. A bounded probe now 
 16 packed rows from the real `blk.64.attn_output.weight` tensor (GGML shape
 `[6144, 5120]`) and checks three input tokens against the canonical dequantized CPU
 reference on B580 `xpu:0`. FP32 max absolute/relative errors were `2.50e-6` / `1.48e-5`;
-BF16 outputs matched exactly. This exercises actual Q6_K weight bytes but does not run
-the omitted MTP layer or a full Q6_K model. The probe copies only the requested rows:
+BF16 outputs matched exactly. A subsequent FP32 run covered all 5,120 rows of that real
+tensor for the same three inputs; it passed with max absolute error `3.43e-5` and max
+relative error `2.18e-2`. The full-tensor run validates the kernel against every packed
+row in this checkpoint tensor, but still does not execute the omitted MTP layer or a
+full Q6_K model. The probe copies only the requested rows:
 
 ```bash
 FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
   experiments/probe_q6_k_real_tensor.py \
   /home/oddsoul/models/Qwen3.8-27B-UD-Q2_K_XL.gguf \
-  --dtype fp32 --rows 16 --tokens 3
+  --dtype fp32 --rows 5120 --tokens 3
 ```
 
 The host B580's `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` contains 329 Q4_0 tensors and 338
