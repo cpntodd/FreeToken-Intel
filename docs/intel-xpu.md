@@ -95,6 +95,30 @@ TTFT was 3.67 s, and the one decode interval took 0.055 s (18.05 decode tokens/s
 This confirms the shared tokenizer fix did not regress this path; it is not a
 steady-state performance comparison.
 
+The HTTP serving path was also exercised on 2026-09-21 with the same Llama checkpoint.
+Start the B580 XPU server:
+
+```bash
+PYTHONPATH=python .venv/bin/python -m freetoken.cli serve \
+  --model-path /home/oddsoul/models/Llama-3.2-1B-Instruct-Q4_K_M.gguf \
+  --accelerator xpu --text-model-only --host 127.0.0.1 --port 8787 \
+  --max-output-tokens 8 --max-seq-len-override 128 --num-tokens 256 \
+  --attention-backend torch
+```
+
+Then send a local OpenAI-compatible request:
+
+```bash
+curl --fail-with-body -sS http://127.0.0.1:8787/v1/chat/completions \
+  -H 'Content-Type: application/json' \
+  -d '{"model":"Llama-3.2-1B-Instruct-Q4_K_M.gguf","messages":[{"role":"user","content":"Say hello in one short sentence."}],"max_tokens":4,"temperature":0}'
+```
+
+The server started with the explicit XPU runtime, allocated the 256-token KV cache,
+and returned HTTP 200 with `Hello!` and three completion tokens. `nvtop` identified the
+Arc B580 and observed 28% memory use during loading. This validates one API/scheduler
+inference path; it is not a model-quality or throughput result.
+
 The revised timer was exercised on the same B580 with:
 
 ```bash
