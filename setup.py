@@ -16,7 +16,10 @@ def _check_toolchain() -> None:
     spec = importlib.util.spec_from_file_location("_freetoken_toolchain", path)
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
-    module.check_nvcc_matches_torch()
+    if ACCELERATOR == "cuda":
+        module.check_nvcc_matches_torch()
+    else:
+        module.check_sycl_matches_torch()
 
 
 def _cuda_runtime_paths() -> tuple[list[str], list[str]]:
@@ -89,6 +92,7 @@ def _extensions():
             ]
         )
     else:
+        _check_toolchain()
         extensions.append(
             CppExtension(
                 name="freetoken.kernel._sycl_kernels",

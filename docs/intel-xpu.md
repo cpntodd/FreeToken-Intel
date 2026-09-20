@@ -110,7 +110,10 @@ for batches of four or more. Q6_K is present only in the omitted MTP layer.
 Build the extension with an `icpx` compiler from the same oneAPI release as the SYCL
 runtime bundled by PyTorch. For the validated `torch==2.12.1+xpu` wheel, that is oneAPI
 2025.3. Mixing a 2026 compiler with the wheel's `libsycl.so.8` produces an incompatible
-extension even if compilation succeeds.
+extension even if compilation succeeds. The build checks that `CXX` belongs to the
+selected oneAPI compiler directory and that its `libsycl` SONAME matches the dependency
+declared by `torch_xpu`; it stops before compilation if the ABI cannot be verified.
+This check requires `readelf` from binutils.
 
 ```bash
 export ONEAPI_ROOT=/opt/intel/oneapi
