@@ -243,18 +243,17 @@ IQ3_S, IQ3_XXS, IQ4_NL, and IQ4_XS. Synthetic FP32/BF16 device tests cover each 
 Real slices of formats present in the Qwen3.8 checkpoint match the FP32 dequantized
 reference, and the complete packed Qwen serving model has run through the public
 `LLM` API on the B580. Q4_0, Q4_1, Q5_0, Q5_1, and IQ4_NL use native SYCL for
-single-token decode; larger XPU batches retain the existing chunked
-dequantize-plus-matmul path.
-IQ4_NL has synthetic packed-block parity coverage, but no model-level result yet. The
-supplied model set has no Q4_1-, Q5_0-, or Q5_1-designated checkpoint, so their coverage
-is synthetic rather than full-model. Warmed 15-iteration B580 microbenchmarks at
+single-token decode. Q4_0 also uses direct SYCL through 16-token batches; larger batches
+retain the existing chunked dequantize-plus-matmul path. The supplied model set includes
+Q4_0 in Gemma 4 but has no Q4_1, IQ4_NL, Q5_0, or Q5_1 tensors, so those four have
+synthetic rather than full-model coverage. Warmed 15-iteration B580 microbenchmarks at
 `[1, 4096] x [4096, 4096]` (BF16)
 measured median direct-SYCL vs XPU dequantize-plus-matmul times of 0.677 vs 2.841 ms for
 Q4_1, 0.428 vs 4.128 ms for Q5_0, 0.520 vs 4.584 ms for Q5_1, and 0.341 vs 3.361 ms
 for IQ4_NL; output parity passed for all four. These are synthetic samples, not
 end-to-end model performance. The focused GGUF dequant and SYCL accelerator suites
-passed 157 tests on the B580. The decode-only dispatch avoids CPU fallback while
-keeping prompt batches on XPU matmul.
+passed 157 tests on the B580. The dispatch avoids CPU fallback; larger Q4_0 batches and
+all prompt batches for the other four formats remain on XPU matmul.
 
 A separate batch sweep compared the five kernels above with the exact XPU
 dequantize-plus-matmul fallback at `[tokens, 5120] x [4096, 5120]` in BF16. On the
@@ -262,9 +261,29 @@ Arc B580, with three warmups and 15 timed iterations, all 25 cases passed output
 Across formats, direct-SYCL speedups were 6.0-11.8x at one token, 7.1-10.8x at four,
 3.9-5.7x at eight, and 2.0-2.9x at sixteen. At 32 tokens the range narrowed to
 0.99-1.46x; Q4_1 was marginally slower than the fallback. These synthetic timings do
-not establish end-to-end model gains, so dispatch remains decode-only pending a same-model
-comparison. Reproduce with `benchmarks/bench_sycl_gguf_batches.py` (documented in
-`benchmarks/README.md`).
+not establish end-to-end model gains. Reproduce with
+`benchmarks/bench_sycl_gguf_batches.py` (documented in `benchmarks/README.md`).
+
+A same-model B580 comparison then tested the 16-token Q4_0 cutoff on the supplied
+`gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` (329 Q4_0 tensors). Each path used this same command
+with prompt `Hi.`, a 128-token context, 256 KV tokens, and EOS ignored until the 16-token
+limit:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
+  benchmarks/bench_xpu_gemma4.py \
+  /home/oddsoul/models/gemma-4-12B-it-qat-UD-Q4_K_XL.gguf \
+  --prompt 'Hi.' --max-tokens 16 --force-decode-length \
+  --context 128 --kv-tokens 256
+```
+
+Three fresh-process runs per path returned identical token IDs. Against the existing
+decode-only dispatch, the experimental cutoff changed median TTFT from 19.46 s to 18.92 s,
+decode from 3.291 to 3.308 tokens/s, and end-to-end output rate from 0.633 to 0.646
+tokens/s. This is a modest observed gain for this B580 checkpoint and prompt; the repeated
+TTFT range shows run-to-run variance, so it is not a general performance claim. The cutoff
+applies only to Q4_0; the other four formats remain decode-only until a supplied model can
+validate them.
 Other active-serving packed formats retain their small-batch and four-token tiled paths.
 In the recorded Qwen3.8 checkpoint, Q6_K is
 present only in the MTP layer that serving currently omits. A bounded probe now reads

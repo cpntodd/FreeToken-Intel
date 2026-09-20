@@ -93,8 +93,8 @@ def fused_mul_mat_gguf(
             q8_0_matvec_sycl,
         )
 
-        # Keep these five SYCL paths decode-only; leave prompt batches on XPU matmul.
-        if qweight_type == GGML_Q4_0 and x.shape[0] == 1:
+        # Bound direct Q4_0 prefill to the 16-token range measured on B580.
+        if qweight_type == GGML_Q4_0 and x.shape[0] <= 16:
             return q4_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q4_1 and x.shape[0] == 1:
             return q4_1_matvec_sycl(x, qweight)

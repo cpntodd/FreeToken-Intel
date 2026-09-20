@@ -508,14 +508,15 @@ def test_fused_mul_mat_gguf_keeps_q5_1_prefill_on_xpu_matmul(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
-def test_fused_mul_mat_gguf_dispatches_q4_0_to_sycl(monkeypatch):
+@pytest.mark.parametrize("batch", [1, 4, 16])
+def test_fused_mul_mat_gguf_dispatches_q4_0_to_sycl(monkeypatch, batch):
     from freetoken.kernel.sycl import causal_conv1d
     from freetoken.layers.gguf import fused_mul_mat_gguf
     from freetoken.models.gguf.dequant import GGML_Q4_0
 
-    x = torch.empty((1, 32), device="xpu")
+    x = torch.empty((batch, 32), device="xpu")
     qweight = torch.empty((2, 18), dtype=torch.uint8, device="xpu")
-    expected = torch.empty((1, 2), device="xpu")
+    expected = torch.empty((batch, 2), device="xpu")
     calls = []
 
     def dispatch(actual_x, actual_qweight):
@@ -532,13 +533,16 @@ def test_fused_mul_mat_gguf_dispatches_q4_0_to_sycl(monkeypatch):
 
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
-def test_fused_mul_mat_gguf_keeps_large_q4_0_batches_on_xpu_matmul(monkeypatch):
+@pytest.mark.parametrize("batch", [17, 32])
+def test_fused_mul_mat_gguf_keeps_q4_0_batches_above_16_on_xpu_matmul(
+    monkeypatch, batch
+):
     from freetoken.kernel.sycl import causal_conv1d
     from freetoken.layers.gguf import fused_mul_mat_gguf
     from freetoken.models.gguf import dequant as dequant_module
     from freetoken.models.gguf.dequant import GGML_Q4_0
 
-    x = torch.ones((2, 32), device="xpu")
+    x = torch.ones((batch, 32), device="xpu")
     qweight = torch.empty((2, 18), dtype=torch.uint8, device="xpu")
     weight = torch.arange(64, dtype=torch.float32, device="xpu").reshape(2, 32)
 
