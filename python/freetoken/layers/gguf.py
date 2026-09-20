@@ -32,6 +32,7 @@ from freetoken.models.gguf.dequant import (
     GGML_IQ2_XXS,
     GGML_IQ2_XS,
     GGML_IQ4_XS,
+    GGML_IQ1_S,
     GGML_Q6_K,
     GGML_Q8_0,
     row_bytes,
@@ -54,6 +55,7 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
     """y = x @ dequant(qweight).T, dispatched by batch size and quant type."""
     if x.device.type == "xpu":
         from freetoken.kernel.sycl.causal_conv1d import (
+            iq1_s_matvec_sycl,
             iq4_xs_matvec_sycl,
             iq2_xs_matvec_sycl,
             iq2_xxs_matvec_sycl,
@@ -106,6 +108,10 @@ def fused_mul_mat_gguf(x: torch.Tensor, qweight: torch.Tensor, qweight_type: int
             )
         if qweight_type == GGML_IQ4_XS:
             return iq4_xs_matvec_sycl(x, qweight)
+        if qweight_type == GGML_IQ1_S:
+            from freetoken.models.gguf.dequant import _iq_table
+
+            return iq1_s_matvec_sycl(x, qweight, _iq_table("IQ1_S", x.device))
         if qweight_type == GGML_IQ2_S:
             from freetoken.models.gguf.dequant import _iq_table
 
