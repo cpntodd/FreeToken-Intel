@@ -92,6 +92,19 @@ def iq3_xxs_matvec_sycl(
     return _sycl_kernels.iq3_xxs_matvec(x, qweight, table, signs)
 
 
+def iq2_s_matvec_sycl(
+    x: torch.Tensor, qweight: torch.Tensor, table: torch.Tensor
+) -> torch.Tensor:
+    try:
+        from freetoken.kernel import _sycl_kernels
+    except ImportError as error:
+        raise RuntimeError(
+            "the native SYCL extension is not installed; rebuild with "
+            "FREETOKEN_ACCELERATOR=xpu and the oneAPI icpx compiler"
+        ) from error
+    return _sycl_kernels.iq2_s_matvec(x, qweight, table)
+
+
 __all__ = [
     "causal_conv1d_decode_sycl",
     "q2_k_matvec_sycl",
@@ -99,5 +112,6 @@ __all__ = [
     "q4_k_matvec_sycl",
     "q5_k_matvec_sycl",
     "iq3_xxs_matvec_sycl",
+    "iq2_s_matvec_sycl",
     "q8_0_matvec_sycl",
 ]
