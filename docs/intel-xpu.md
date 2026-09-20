@@ -204,10 +204,32 @@ group size 128 (34 bytes per block), while upstream Q2_0 is group size 64. The
 and [upstream tracking issue](https://github.com/ggml-org/llama.cpp/issues/29058)
 describe the distinction.
 
-The older Ternary-Bonsai file has no `prism.hadamard.*` metadata. Bonsai 2 additionally
-declares a block-1024 normalized Walsh-Hadamard transform, explicit signs, and grouped
-GDN values. Registering type 142 alone would therefore not establish Bonsai 2
-correctness. Neither file has completed inference in FreeToken; support requires a
-format-aware reader/kernel and, for Bonsai 2, model-transform handling with reference
-parity. Until then these checkpoints fail explicitly at GGUF parsing rather than
-silently being interpreted as another quant format.
+The classic `Ternary-Bonsai-27B-PQ2_0.gguf` has no `prism.hadamard.*` metadata. Its
+private type 142 is handled by a per-reader GGUF adapter, a 128-value/34-byte block
+dequantizer, and a native XPU SYCL matvec; the upstream `gguf-py` enum is not modified.
+On the host Arc B580 (device ID `0xE20B`, driver `1.6.33578+15`, Level Zero V2), all four
+direct PQ2_0 dtype/batch cases passed, along with the 59-test SYCL extension file and
+the targeted GGUF reader/dequant/model tests (21 passed). A short end-to-end run of the
+classic checkpoint also loaded and generated `The user wants` using the XPU runtime.
+
+The native extension was rebuilt with oneAPI DPC++ 2025.3.3; its `libsycl.so.8` matches
+the `libsycl.so.8` dependency of this PyTorch XPU build. Reproduce the model smoke test
+with:
+
+```bash
+FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python \
+  .venv/bin/python benchmarks/bench_xpu_gemma4.py \
+  /home/oddsoul/models/Ternary-Bonsai-27B-PQ2_0.gguf \
+  --max-tokens 4 --context 128 --kv-tokens 256
+```
+
+The smoke run loaded the model in 38.59 s and generated 3 tokens in 21.43 s. This is
+functional evidence, not a throughput baseline: the short response ended early and the
+benchmark's generation timer includes prompt prefill. Do not use its reported average as
+decode tokens/s.
+
+Bonsai 2 additionally declares a block-1024 normalized Walsh-Hadamard transform,
+explicit signs, and grouped GDN values. Registering type 142 alone does not establish
+Bonsai 2 correctness; it remains unsupported until its model-transform handling has
+reference parity. The loader rejects its unsupported transform metadata rather than
+silently interpreting it as the classic Bonsai format.

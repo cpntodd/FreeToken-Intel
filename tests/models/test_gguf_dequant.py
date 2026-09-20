@@ -14,6 +14,7 @@ from freetoken.models.gguf.dequant import (
     GGML_IQ3_S,
     GGML_IQ3_XXS,
     GGML_IQ4_XS,
+    GGML_PQ2_0,
     GGML_Q2_K,
     GGML_Q3_K,
     GGML_Q4_K,
@@ -34,6 +35,19 @@ def test_q4_k_dequant_matches_gguf_reference():
     actual = dequantize(torch.from_numpy(raw), GGML_Q4_K, torch.float32)
 
     torch.testing.assert_close(actual, torch.from_numpy(expected).reshape(-1))
+
+
+def test_pq2_0_dequant_uses_prism_128_value_blocks():
+    raw = torch.zeros((1, 34), dtype=torch.uint8)
+    raw[0, :2] = torch.tensor([0, 56], dtype=torch.uint8)  # fp16 0.5
+    raw[0, 2:] = 0b11_10_01_00
+
+    actual = dequantize(raw, GGML_PQ2_0, torch.float32)
+    expected = torch.tensor([-0.5, 0.0, 0.5, 1.0] * 32)
+
+    torch.testing.assert_close(actual, expected)
+    assert BLOCK_SHAPE[GGML_PQ2_0] == (128, 34)
+    assert row_bytes(5120, GGML_PQ2_0) == 1360
 
 
 @pytest.mark.parametrize(

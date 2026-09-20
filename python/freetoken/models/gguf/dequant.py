@@ -39,12 +39,14 @@ GGML_IQ2_S = 22
 GGML_IQ4_XS = 23
 GGML_IQ1_M = 29
 GGML_BF16 = 30
+GGML_PQ2_0 = 142
 
 # (block numel, bytes per block) per ggml type.
 BLOCK_SHAPE: dict[int, tuple[int, int]] = {
     GGML_F32: (1, 4),
     GGML_F16: (1, 2),
     GGML_BF16: (1, 2),
+    GGML_PQ2_0: (128, 34),
     GGML_Q4_0: (32, 18),
     GGML_Q8_0: (32, 34),
     GGML_Q2_K: (256, 84),
@@ -66,6 +68,7 @@ GGML_NAME = {
     GGML_F32: "F32",
     GGML_F16: "F16",
     GGML_BF16: "BF16",
+    GGML_PQ2_0: "PQ2_0",
     GGML_Q4_0: "Q4_0",
     GGML_Q8_0: "Q8_0",
     GGML_Q2_K: "Q2_K",
@@ -529,9 +532,21 @@ def dequant_iq1_m(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
 
 def dequant_q8_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     blocks = raw.reshape(-1, 34)
-    scale = blocks[:, :2].contiguous().view(torch.float16).to(torch.float32).reshape(-1, 1)
+    scale = (
+        blocks[:, :2].contiguous().view(torch.float16).to(torch.float32).reshape(-1, 1)
+    )
     quants = blocks[:, 2:].contiguous().view(torch.int8).to(torch.float32)
     return (quants * scale).reshape(-1).to(out_dtype)
+
+
+def dequant_pq2_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """PQ2_0: 128 two-bit values and one fp16 scale in each 34-byte block."""
+    blocks = raw.reshape(-1, 34)
+    scale = _f16_scales(blocks, 0, 2)
+    shifts = torch.arange(0, 8, 2, dtype=torch.int32, device=raw.device)
+    quants = (blocks[:, 2:].to(torch.int32).unsqueeze(-1) >> shifts) & 0x03
+    values = (quants.reshape(-1, 128).to(torch.float32) - 1.0) * scale
+    return values.reshape(-1).to(out_dtype)
 
 
 _DEQUANT = {
@@ -543,6 +558,7 @@ _DEQUANT = {
     GGML_IQ3_S: dequant_iq3_s,
     GGML_IQ3_XXS: dequant_iq3_xxs,
     GGML_IQ4_XS: dequant_iq4_xs,
+    GGML_PQ2_0: dequant_pq2_0,
     GGML_Q4_0: dequant_q4_0,
     GGML_Q2_K: dequant_q2_k,
     GGML_Q3_K: dequant_q3_k,
@@ -585,6 +601,7 @@ __all__ = [
     "GGML_IQ3_XXS",
     "GGML_IQ4_XS",
     "GGML_NAME",
+    "GGML_PQ2_0",
     "GGML_Q2_K",
     "GGML_Q3_K",
     "GGML_Q4_0",
@@ -600,6 +617,7 @@ __all__ = [
     "dequant_iq3_s",
     "dequant_iq3_xxs",
     "dequant_iq4_xs",
+    "dequant_pq2_0",
     "dequant_q2_k",
     "dequant_q3_k",
     "dequant_q4_0",

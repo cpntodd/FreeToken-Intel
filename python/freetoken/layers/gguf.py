@@ -29,6 +29,7 @@ from freetoken.models.gguf.dequant import (
     GGML_IQ3_XXS,
     GGML_IQ4_XS,
     GGML_NAME,
+    GGML_PQ2_0,
     GGML_Q2_K,
     GGML_Q3_K,
     GGML_Q4_0,
@@ -66,6 +67,7 @@ def fused_mul_mat_gguf(
             iq3_s_matvec_sycl,
             iq3_xxs_matvec_sycl,
             iq4_xs_matvec_sycl,
+            pq2_0_matvec_sycl,
             q2_k_matvec_sycl,
             q3_k_matvec_sycl,
             q4_k_matvec_sycl,
@@ -77,6 +79,8 @@ def fused_mul_mat_gguf(
             return q8_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q2_K:
             return q2_k_matvec_sycl(x, qweight)
+        if qweight_type == GGML_PQ2_0:
+            return pq2_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q3_K:
             return q3_k_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q4_K:

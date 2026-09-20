@@ -1,3 +1,4 @@
+import pytest
 import torch
 from freetoken.models.gguf.config import GgufConfigShim
 from freetoken.models.qwen3_5_moe.gdn import Qwen3_5GatedDeltaNet
@@ -61,6 +62,13 @@ def test_qwen35_metadata_rejects_inconsistent_delta_head_geometry():
         assert "value-head count" in str(error)
     else:
         raise AssertionError("expected inconsistent GDN geometry to be rejected")
+
+
+def test_qwen35_metadata_rejects_prism_hadamard_weights():
+    shim = _shim(**{"prism.hadamard.version": 1})
+
+    with pytest.raises(NotImplementedError, match="Hadamard-transformed"):
+        parse_gguf_config(shim)
 
 
 def test_mixed_gguf_linear_keeps_each_projection_in_its_own_quant_format():

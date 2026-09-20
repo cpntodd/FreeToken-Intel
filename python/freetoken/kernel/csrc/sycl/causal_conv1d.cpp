@@ -554,6 +554,144 @@ torch::Tensor q2_k_matvec(torch::Tensor x, torch::Tensor qweight) {
 }
 
 template <typename scalar_t>
+void launch_pq2_0_matvec(const torch::Tensor &x, const torch::Tensor &qweight,
+                         torch::Tensor &output) {
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kBlockBytes = 34;
+  constexpr int64_t kWorkgroupSize = 256;
+  const int64_t batch = x.size(0);
+  const int64_t in_features = x.size(1);
+  const int64_t out_features = qweight.size(0);
+  const int64_t blocks_per_row = in_features / kBlockSize;
+  const auto *x_ptr = reinterpret_cast<const scalar_t *>(x.data_ptr());
+  const auto *weight_ptr = qweight.data_ptr<uint8_t>();
+  auto *out_ptr = reinterpret_cast<scalar_t *>(output.data_ptr());
+  sycl::queue &queue = c10::xpu::getCurrentXPUStream(x.get_device()).queue();
+  const int64_t groups = batch * out_features;
+
+  queue.parallel_for(
+      sycl::nd_range<1>(sycl::range<1>(groups * kWorkgroupSize),
+                        sycl::range<1>(kWorkgroupSize)),
+      [=](sycl::nd_item<1> item) {
+        const int64_t group = item.get_group(0);
+        const int64_t token = group / out_features;
+        const int64_t row = group - token * out_features;
+        float partial = 0.0f;
+        for (int64_t index = item.get_local_id(0); index < in_features;
+             index += kWorkgroupSize) {
+          const int64_t block = index / kBlockSize;
+          const int64_t in_block = index % kBlockSize;
+          const uint8_t *packed =
+              weight_ptr + (row * blocks_per_row + block) * kBlockBytes;
+          const int shift = static_cast<int>((in_block % 4) * 2);
+          const int quant = (packed[2 + in_block / 4] >> shift) & 0x03;
+          const float scale =
+              static_cast<float>(*reinterpret_cast<const sycl::half *>(packed));
+          const float weight = static_cast<float>(quant - 1) * scale;
+          partial +=
+              static_cast<float>(x_ptr[token * in_features + index]) * weight;
+        }
+        const float sum = sycl::reduce_over_group(item.get_group(), partial,
+                                                  sycl::plus<float>());
+        if (item.get_local_id(0) == 0) {
+          out_ptr[group] = static_cast<scalar_t>(sum);
+        }
+      });
+}
+
+template <typename scalar_t>
+void launch_pq2_0_matvec_tiled(const torch::Tensor &x,
+                               const torch::Tensor &qweight,
+                               torch::Tensor &output) {
+  constexpr int64_t kBlockSize = 128;
+  constexpr int64_t kBlockBytes = 34;
+  constexpr int64_t kWorkgroupSize = 256;
+  constexpr int64_t kTokenTile = 4;
+  const int64_t batch = x.size(0);
+  const int64_t in_features = x.size(1);
+  const int64_t out_features = qweight.size(0);
+  const int64_t blocks_per_row = in_features / kBlockSize;
+  const int64_t token_tiles = (batch + kTokenTile - 1) / kTokenTile;
+  const auto *x_ptr = reinterpret_cast<const scalar_t *>(x.data_ptr());
+  const auto *weight_ptr = qweight.data_ptr<uint8_t>();
+  auto *out_ptr = reinterpret_cast<scalar_t *>(output.data_ptr());
+  sycl::queue &queue = c10::xpu::getCurrentXPUStream(x.get_device()).queue();
+  const int64_t groups = token_tiles * out_features;
+
+  queue.parallel_for(
+      sycl::nd_range<1>(sycl::range<1>(groups * kWorkgroupSize),
+                        sycl::range<1>(kWorkgroupSize)),
+      [=](sycl::nd_item<1> item) {
+        const int64_t group = item.get_group(0);
+        const int64_t token_base = (group / out_features) * kTokenTile;
+        const int64_t row = group % out_features;
+        float partial[kTokenTile] = {};
+        for (int64_t index = item.get_local_id(0); index < in_features;
+             index += kWorkgroupSize) {
+          const int64_t block = index / kBlockSize;
+          const int64_t in_block = index % kBlockSize;
+          const uint8_t *packed =
+              weight_ptr + (row * blocks_per_row + block) * kBlockBytes;
+          const int shift = static_cast<int>((in_block % 4) * 2);
+          const int quant = (packed[2 + in_block / 4] >> shift) & 0x03;
+          const float scale =
+              static_cast<float>(*reinterpret_cast<const sycl::half *>(packed));
+          const float weight = static_cast<float>(quant - 1) * scale;
+          for (int64_t tile = 0; tile < kTokenTile; ++tile) {
+            const int64_t token = token_base + tile;
+            if (token < batch) {
+              partial[tile] +=
+                  static_cast<float>(x_ptr[token * in_features + index]) *
+                  weight;
+            }
+          }
+        }
+        for (int64_t tile = 0; tile < kTokenTile; ++tile) {
+          const int64_t token = token_base + tile;
+          const float sum = sycl::reduce_over_group(
+              item.get_group(), partial[tile], sycl::plus<float>());
+          if (item.get_local_id(0) == 0 && token < batch) {
+            out_ptr[token * out_features + row] = static_cast<scalar_t>(sum);
+          }
+        }
+      });
+}
+
+torch::Tensor pq2_0_matvec(torch::Tensor x, torch::Tensor qweight) {
+  TORCH_CHECK(x.device().is_xpu(), "x must be an XPU tensor");
+  TORCH_CHECK(qweight.device() == x.device(),
+              "qweight must be on the same XPU device as x");
+  TORCH_CHECK(x.dim() == 2 && qweight.dim() == 2,
+              "x and qweight must be rank-2 tensors");
+  TORCH_CHECK(x.is_contiguous() && qweight.is_contiguous(),
+              "x and qweight must be contiguous");
+  TORCH_CHECK(qweight.scalar_type() == torch::kUInt8,
+              "qweight must use uint8 storage");
+  TORCH_CHECK(x.size(1) % 128 == 0,
+              "PQ2_0 input width must be divisible by 128");
+  TORCH_CHECK(qweight.size(1) == x.size(1) / 128 * 34,
+              "qweight has invalid PQ2_0 row geometry");
+  auto output = torch::empty({x.size(0), qweight.size(0)}, x.options());
+  if (x.scalar_type() == torch::kFloat32) {
+    if (x.size(0) >= 4) {
+      launch_pq2_0_matvec_tiled<float>(x, qweight, output);
+    } else {
+      launch_pq2_0_matvec<float>(x, qweight, output);
+    }
+  } else if (x.scalar_type() == torch::kBFloat16) {
+    if (x.size(0) >= 4) {
+      launch_pq2_0_matvec_tiled<sycl::ext::oneapi::bfloat16>(x, qweight,
+                                                             output);
+    } else {
+      launch_pq2_0_matvec<sycl::ext::oneapi::bfloat16>(x, qweight, output);
+    }
+  } else {
+    TORCH_CHECK(false, "pq2_0_matvec supports float32 and bfloat16 inputs");
+  }
+  return output;
+}
+
+template <typename scalar_t>
 void launch_q3_k_matvec(const torch::Tensor &x, const torch::Tensor &qweight,
                         torch::Tensor &output) {
   constexpr int64_t kBlockSize = 256;
@@ -2364,6 +2502,7 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
   module.def("q8_0_matvec", &q8_0_matvec, "SYCL Q8_0 matrix-vector product");
   module.def("q4_k_matvec", &q4_k_matvec, "SYCL Q4_K matrix-vector product");
   module.def("q2_k_matvec", &q2_k_matvec, "SYCL Q2_K matrix-vector product");
+  module.def("pq2_0_matvec", &pq2_0_matvec, "SYCL PQ2_0 matrix-vector product");
   module.def("q3_k_matvec", &q3_k_matvec, "SYCL Q3_K matrix-vector product");
   module.def("q5_k_matvec", &q5_k_matvec, "SYCL Q5_K matrix-vector product");
   module.def("iq3_xxs_matvec", &iq3_xxs_matvec,

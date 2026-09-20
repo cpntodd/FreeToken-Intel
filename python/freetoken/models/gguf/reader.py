@@ -13,8 +13,9 @@ from __future__ import annotations
 import functools
 import os
 import struct
+from collections.abc import Iterator
 from dataclasses import dataclass
-from typing import Any, Iterator
+from typing import Any
 
 import numpy as np
 import torch
@@ -22,8 +23,10 @@ import torch
 
 def is_gguf_path(model_path: str) -> bool:
     """A single ``.gguf`` file (the only GGUF layout FreeToken loads directly)."""
-    return isinstance(model_path, str) and os.path.isfile(model_path) and model_path.endswith(
-        ".gguf"
+    return (
+        isinstance(model_path, str)
+        and os.path.isfile(model_path)
+        and model_path.endswith(".gguf")
     )
 
 
@@ -67,7 +70,7 @@ def write_metadata_gguf(source_gguf: str, dest_path: str) -> None:
     """
     import gguf
 
-    reader = gguf.GGUFReader(source_gguf)
+    reader = _new_reader(source_gguf)
     assert reader.tensors, f"{source_gguf}: no tensors to bound the KV section"
     # The first tensor-info record starts exactly where the KV section ends (GGUF places no
     # padding between KV and tensor infos; padding is only before the tensor *data*).
@@ -81,14 +84,16 @@ def write_metadata_gguf(source_gguf: str, dest_path: str) -> None:
     key = OUTPUT_WEIGHT_PRESENT_KV.encode()
     present = any(t.name == "output.weight" for t in reader.tensors)
     buf += struct.pack("<Q", len(key)) + key
-    buf += struct.pack("<I", int(gguf.GGUFValueType.BOOL)) + bytes([1 if present else 0])
+    buf += struct.pack("<I", int(gguf.GGUFValueType.BOOL)) + bytes(
+        [1 if present else 0]
+    )
     struct.pack_into("<Q", buf, 16, struct.unpack_from("<Q", buf, 16)[0] + 1)
     tmp = dest_path + ".tmp"
     with open(tmp, "wb") as f:
         f.write(buf)
     os.replace(tmp, dest_path)
 
-    check = gguf.GGUFReader(dest_path)
+    check = _new_reader(dest_path)
     assert not check.tensors, "metadata gguf still lists tensors after patch"
     src_keys = {k for k in reader.fields if not k.startswith("GGUF.")}
     dst_keys = {k for k in check.fields if not k.startswith("GGUF.")}
@@ -121,9 +126,62 @@ def _field_value(reader, name: str) -> Any:
 
 @functools.cache
 def _reader(model_path: str):
-    import gguf
+    return _new_reader(model_path)
 
-    return gguf.GGUFReader(model_path)
+
+def _new_reader(model_path: str):
+    import gguf
+    from gguf.gguf_reader import ReaderTensor
+
+    from .dequant import GGML_PQ2_0
+
+    class FreeTokenGGUFReader(gguf.GGUFReader):
+        def _build_tensors(self, start_offs, fields):
+            # Keep gguf-py's normal enum path for standard types; intercept only PQ2_0.
+            pq2_fields = [
+                field for field in fields if int(field.parts[4][0]) == GGML_PQ2_0
+            ]
+            if not pq2_fields:
+                return super()._build_tensors(start_offs, fields)
+
+            pq2_field_ids = {id(field) for field in pq2_fields}
+            standard_fields = [
+                field for field in fields if id(field) not in pq2_field_ids
+            ]
+            super()._build_tensors(start_offs, standard_fields)
+            tensors = {id(tensor.field): tensor for tensor in self.tensors}
+            for field in pq2_fields:
+                _name_len, name_data, _n_dims, dims, _raw_type, tensor_offset = (
+                    field.parts
+                )
+                ggml_shape = tuple(int(dim) for dim in dims)
+                numpy_shape = tuple(reversed(ggml_shape))
+                n_elements = int(np.prod(dims))
+                if not numpy_shape or numpy_shape[-1] % 128:
+                    raise ValueError(
+                        f"{bytes(name_data).decode()}: PQ2_0 row width must be a "
+                        "multiple of 128"
+                    )
+                n_bytes = n_elements // 128 * 34
+                data_offset = int(start_offs + tensor_offset[0])
+                byte_shape = (
+                    *numpy_shape[:-1],
+                    numpy_shape[-1] // 128 * 34,
+                )
+                tensor = ReaderTensor(
+                    name=bytes(name_data).decode(),
+                    tensor_type=GGML_PQ2_0,
+                    shape=dims,
+                    n_elements=n_elements,
+                    n_bytes=n_bytes,
+                    data_offset=data_offset,
+                    data=self._get(data_offset, np.uint8, n_bytes).reshape(byte_shape),
+                    field=field,
+                )
+                tensors[id(field)] = tensor
+            self.tensors = [tensors[id(field)] for field in fields]
+
+    return FreeTokenGGUFReader(model_path)
 
 
 @functools.cache
@@ -144,16 +202,21 @@ def iter_gguf_tensors(model_path: str) -> Iterator[GgufTensor]:
     """Yield every tensor with its torch shape, ggml type, and packed block bytes."""
     import gguf
 
+    from .dequant import BLOCK_SHAPE, GGML_NAME, GGML_PQ2_0
+
     reader = _reader(model_path)
     for t in reader.tensors:
         ne = [int(s) for s in t.shape]  # ggml order, fastest dim first
         torch_shape = tuple(reversed(ne))
-        block, type_size = gguf.GGML_QUANT_SIZES[t.tensor_type]
+        if int(t.tensor_type) == GGML_PQ2_0:
+            block, type_size = BLOCK_SHAPE[GGML_PQ2_0]
+        else:
+            block, type_size = gguf.GGML_QUANT_SIZES[t.tensor_type]
         n_fast = ne[0]
         if n_fast % block != 0:
             raise ValueError(
                 f"{t.name}: fastest dim {n_fast} not a multiple of block {block} "
-                f"for {t.tensor_type.name}"
+                f"for {getattr(t.tensor_type, 'name', GGML_NAME.get(int(t.tensor_type), t.tensor_type))}"
             )
         row_bytes = n_fast // block * type_size
         rows = int(np.prod(ne[1:])) if len(ne) > 1 else 1
@@ -176,14 +239,14 @@ def gguf_tensor_names(model_path: str) -> set[str]:
 
 
 __all__ = [
-    "is_gguf_path",
     "FTW_METADATA_GGUF",
     "OUTPUT_WEIGHT_PRESENT_KV",
-    "gguf_config_source",
-    "write_metadata_gguf",
     "GgufTensor",
-    "load_gguf_metadata",
     "gguf_architecture",
-    "iter_gguf_tensors",
+    "gguf_config_source",
     "gguf_tensor_names",
+    "is_gguf_path",
+    "iter_gguf_tensors",
+    "load_gguf_metadata",
+    "write_metadata_gguf",
 ]

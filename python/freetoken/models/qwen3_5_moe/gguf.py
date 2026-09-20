@@ -22,6 +22,11 @@ if TYPE_CHECKING:
 
 def parse_gguf_config(shim: GgufConfigShim) -> ModelConfig:
     metadata = shim.metadata
+    if any(key.startswith("prism.hadamard.") for key in metadata):
+        raise NotImplementedError(
+            "Prism Hadamard-transformed GGUF weights are not supported; "
+            "use a non-transformed checkpoint or a Prism-compatible runtime"
+        )
 
     def get(key: str):
         value = metadata.get(f"qwen35.{key}")
@@ -190,7 +195,9 @@ def convert_qwen35_to_gguf(model, config: ModelConfig) -> None:
                 ],
             )
             op.out_proj = GGUFLinear(
-                op.value_dim, config.hidden_size, _type(config, f"{prefix}.ssm_out.weight")
+                op.value_dim,
+                config.hidden_size,
+                _type(config, f"{prefix}.ssm_out.weight"),
             )
             op.gguf_tiled_v = True
         else:
@@ -204,7 +211,9 @@ def convert_qwen35_to_gguf(model, config: ModelConfig) -> None:
                 ],
             )
             op.o_proj = GGUFLinear(
-                op.qo_attn_dim, config.hidden_size, _type(config, f"{prefix}.attn_output.weight")
+                op.qo_attn_dim,
+                config.hidden_size,
+                _type(config, f"{prefix}.attn_output.weight"),
             )
 
         layer.mlp.gate_up_proj = GGUFMergedLinear(
@@ -221,7 +230,9 @@ def convert_qwen35_to_gguf(model, config: ModelConfig) -> None:
         )
 
     if config.tie_word_embeddings:
-        raise NotImplementedError("tied Qwen3.8 GGUF output heads are not yet supported")
+        raise NotImplementedError(
+            "tied Qwen3.8 GGUF output heads are not yet supported"
+        )
     model.lm_head = GGUFUntiedLMHead(
         config.hidden_size, config.vocab_size, _type(config, "output.weight")
     )
@@ -239,9 +250,9 @@ _DENSE_MAP = {
 def _to_bf16(tensor) -> torch.Tensor:
     from freetoken.models.gguf.dequant import dequantize
 
-    return dequantize(tensor.packed().reshape(-1), tensor.ggml_type, torch.bfloat16).reshape(
-        tensor.shape
-    )
+    return dequantize(
+        tensor.packed().reshape(-1), tensor.ggml_type, torch.bfloat16
+    ).reshape(tensor.shape)
 
 
 def _v_tiled_to_grouped(value: torch.Tensor, config: ModelConfig) -> torch.Tensor:
@@ -249,7 +260,12 @@ def _v_tiled_to_grouped(value: torch.Tensor, config: ModelConfig) -> torch.Tenso
     assert group is not None
     ratio = group.num_value_heads // group.num_key_heads
     shape = value.shape
-    return value.reshape(ratio, group.num_key_heads, *shape[1:]).transpose(0, 1).contiguous().reshape(shape)
+    return (
+        value.reshape(ratio, group.num_key_heads, *shape[1:])
+        .transpose(0, 1)
+        .contiguous()
+        .reshape(shape)
+    )
 
 
 def iter_gguf_weights(

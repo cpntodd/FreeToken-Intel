@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import builtins
+
 import pytest
 import torch
 
@@ -11,6 +13,21 @@ def _reference(x, state, weight, indices):
     expected_state = state.clone()
     expected_state.index_copy_(0, indices.to(torch.int64), window[..., 1:])
     return output, expected_state
+
+
+def test_sycl_wrapper_preserves_extension_abi_import_error(monkeypatch):
+    from freetoken.kernel.sycl.causal_conv1d import pq2_0_matvec_sycl
+
+    real_import = builtins.__import__
+
+    def fail_extension_import(name, globals=None, locals=None, fromlist=(), level=0):
+        if name == "freetoken.kernel" and "_sycl_kernels" in fromlist:
+            raise ImportError("undefined SYCL runtime symbol")
+        return real_import(name, globals, locals, fromlist, level)
+
+    monkeypatch.setattr(builtins, "__import__", fail_extension_import)
+    with pytest.raises(ImportError, match="undefined SYCL runtime symbol"):
+        pq2_0_matvec_sycl(torch.empty((1, 128)), torch.empty((1, 34)))
 
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
@@ -104,6 +121,27 @@ def test_sycl_q2_k_matvec_matches_dequantized_reference(dtype, batch):
     torch.xpu.synchronize()
 
     tolerance = 1e-5 if dtype == torch.float32 else 6e-2
+    torch.testing.assert_close(actual.cpu(), expected, rtol=tolerance, atol=tolerance)
+
+
+@pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
+@pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
+@pytest.mark.parametrize("batch", [3, 5])
+def test_sycl_pq2_0_matvec_matches_dequantized_reference(dtype, batch):
+    from freetoken.layers.gguf import fused_mul_mat_gguf
+    from freetoken.models.gguf.dequant import GGML_PQ2_0, dequantize
+
+    generator = torch.Generator().manual_seed(43)
+    qweight = torch.randint(0, 256, (11, 136), dtype=torch.uint8, generator=generator)
+    blocks = qweight.view(11, 4, 34)
+    blocks[:, :, :2] = torch.tensor([0, 52], dtype=torch.uint8)
+    x_cpu = torch.randn(batch, 512, dtype=dtype, generator=generator)
+    expected = x_cpu @ dequantize(qweight, GGML_PQ2_0, dtype).reshape(11, 512).T
+
+    actual = fused_mul_mat_gguf(x_cpu.to("xpu"), qweight.to("xpu"), GGML_PQ2_0)
+    torch.xpu.synchronize()
+
+    tolerance = 2e-5 if dtype == torch.float32 else 6e-2
     torch.testing.assert_close(actual.cpu(), expected, rtol=tolerance, atol=tolerance)
 
 
