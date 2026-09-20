@@ -97,6 +97,8 @@ print(caps)
 print("Q4_0 output:", tuple(actual.shape), "max abs error:",
       (actual.cpu().float() - expected).abs().max().item())
 PY
+  PYTHONPATH="$FT_XPU_WHEEL_TMP/install" FREETOKEN_ACCELERATOR=xpu \
+    "$FT_XPU_WHEEL_TMP/install/bin/ft" devices --json
 )
 ```
 
@@ -105,7 +107,9 @@ On 2026-09-21, this check passed on the host Arc B580 (`0xE20B`, driver
 imports resolved from the temporary installation, and the `[4, 96]` by Q4_0 operation
 returned shape `[4, 11]` with maximum absolute error `7.63e-6`. `nvtop -s` identified
 Battlemage G21 / Arc B580 and reported 4% memory use after the operation; its utilization
-field was unavailable in that idle snapshot.
+field was unavailable in that idle snapshot. The installed `ft devices --json` command
+also reported XPU `available`, CUDA `unavailable`, device `xpu:0`, and the eager/single-GPU
+engine constraints from the wheel.
 
 Run the hardware benchmark with a supported local GGUF:
 
