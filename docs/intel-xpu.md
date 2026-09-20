@@ -127,26 +127,31 @@ used by gated-delta-network decode. It submits to PyTorch's current XPU queue, s
 ownership and stream ordering remain inside the existing engine. FP32 and BF16 output
 and in-place state updates are validated on the Arc B580.
 
-The same extension includes direct packed GGUF matvec kernels for Q8_0, Q2_K, Q3_K,
-Q4_K, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS, and IQ4_XS. XPU
-`GGUFLinear` dispatches these formats without materializing a full dense weight or
-falling back to CPU. Synthetic FP32/BF16 device tests cover each format, real slices
-from the Qwen3.8 checkpoint match the FP32 dequantized reference, and the complete
-packed Qwen serving model has run through the public `LLM` API on the B580. Every
-active-serving format has both a direct small-batch path and a four-token tiled path
-for batches of four or more. Q6_K uses a four-token tiled SYCL path. In the recorded
-Qwen3.8 checkpoint, Q6_K is present only in the MTP layer that serving currently omits;
-the new path enables direct execution for other Q6_K GGUF layers and checkpoints.
+The same extension includes direct packed GGUF matvec kernels for Q4_0, Q8_0, Q2_K,
+Q3_K, Q4_K, Q5_K, Q6_K, IQ1_S, IQ1_M, IQ2_S, IQ2_XXS, IQ2_XS, IQ3_S, IQ3_XXS, and IQ4_XS.
+Synthetic FP32/BF16 device tests cover each format, real slices from the Qwen3.8
+checkpoint match the FP32 dequantized reference, and the complete packed Qwen serving
+model has run through the public `LLM` API on the B580. Q4_0 currently uses the native
+SYCL kernel for single-token decode; larger XPU batches retain the existing chunked
+dequantize-plus-matmul path. This avoids CPU fallback while keeping the slower measured
+prompt path off the direct kernel. Other active-serving packed formats retain their
+small-batch and four-token tiled paths. In the recorded Qwen3.8 checkpoint, Q6_K is
+present only in the MTP layer that serving currently omits; synthetic tests cover the
+new Q6_K path, but no real checkpoint inference has yet exercised it.
 
-The host B580's `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` exercises Q6_K in the tied output
-embedding. A forced eight-token run returned seven tokens (six decode intervals):
-TTFT 8.36 s, decode 0.540 tokens/s, and 19.63 s generation time. Repeating the same
-settings with a runtime override that reproduces the previous chunked dequantize-plus-
-matmul fallback measured TTFT 7.73 s, 0.548 decode tokens/s, and 18.81 s generation.
-Both runs emitted the same token IDs. These are single cold runs and show no throughput
-win; the direct kernel's current value is avoiding dense Q6_K expansion while preserving
-output behavior. Forced-length output included repeated special tokens, so this is a
-kernel/serving-path check, not a quality sample.
+The host B580's `gemma-4-12B-it-qat-UD-Q4_K_XL.gguf` contains 329 Q4_0 tensors and 338
+F32 tensors, with no Q6_K tensors. The earlier note claiming this checkpoint exercised
+Q6_K was incorrect: those runs used the prior Q4_0 XPU fallback. On this model and the
+20-token prompt below, a forced eight-token first direct run reported 349.41 s TTFT and
+2.93 decode tokens/s. A repeated direct run with the same token IDs reported 16.60 s
+TTFT and 3.40 decode tokens/s. The previous chunked XPU fallback, restored by a runtime
+override, reported 8.68 s TTFT and 0.50 decode tokens/s. A run using the hybrid dispatch
+(XPU matmul for prompt prefill, native SYCL for single-token decode) returned the same
+token IDs and reported 20.55 s TTFT and 2.93 decode tokens/s. These are single samples
+with substantial timing variance: decode improved in the direct/hybrid runs, but no
+TTFT or end-to-end throughput win is established. The cause of the very high first-run
+TTFT has not been isolated. Forced-length output included repeated control tokens, so
+this is a kernel/serving-path check, not a quality sample.
 
 ```bash
 FREETOKEN_ACCELERATOR=xpu PYTHONPATH=python .venv/bin/python \
