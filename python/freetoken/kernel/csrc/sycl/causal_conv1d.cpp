@@ -3,6 +3,8 @@
 #include <c10/xpu/XPUStream.h>
 #include <torch/extension.h>
 
+#include <cmath>
+
 namespace {
 
 template <typename scalar_t>
@@ -1484,6 +1486,99 @@ torch::Tensor q6_k_matvec(torch::Tensor x, torch::Tensor qweight) {
 }
 
 template <typename scalar_t>
+void launch_hadamard_transform(const torch::Tensor &x,
+                               const torch::Tensor &signs,
+                               torch::Tensor &output, int64_t block_size) {
+  constexpr int64_t kWorkgroupSize = 256;
+  const int64_t rows = x.size(0);
+  const int64_t width = x.size(1);
+  const int64_t blocks_per_row = width / block_size;
+  const int64_t groups = rows * blocks_per_row;
+  const auto *x_ptr = reinterpret_cast<const scalar_t *>(x.data_ptr());
+  const auto *signs_ptr = signs.data_ptr<float>();
+  auto *output_ptr = reinterpret_cast<scalar_t *>(output.data_ptr());
+  const float normalization = 1.0f / std::sqrt(static_cast<float>(block_size));
+  sycl::queue &queue = c10::xpu::getCurrentXPUStream(x.get_device()).queue();
+
+  queue.submit([&](sycl::handler &handler) {
+    sycl::local_accessor<float, 1> scratch(sycl::range<1>(block_size), handler);
+    handler.parallel_for(
+        sycl::nd_range<1>(sycl::range<1>(groups * kWorkgroupSize),
+                          sycl::range<1>(kWorkgroupSize)),
+        [=](sycl::nd_item<1> item) {
+          const int64_t group = item.get_group(0);
+          const int64_t row = group / blocks_per_row;
+          const int64_t block = group % blocks_per_row;
+          const int64_t feature_base = block * block_size;
+          const int64_t input_base = row * width + feature_base;
+
+          for (int64_t index = item.get_local_id(0); index < block_size;
+               index += kWorkgroupSize) {
+            scratch[index] = static_cast<float>(x_ptr[input_base + index]) *
+                             signs_ptr[feature_base + index];
+          }
+          item.barrier(sycl::access::fence_space::local_space);
+
+          for (int64_t stride = 1; stride < block_size; stride *= 2) {
+            for (int64_t pair = item.get_local_id(0); pair < block_size / 2;
+                 pair += kWorkgroupSize) {
+              const int64_t group_index = pair / stride;
+              const int64_t offset = pair % stride;
+              const int64_t low = group_index * stride * 2 + offset;
+              const int64_t high = low + stride;
+              const float left = scratch[low];
+              const float right = scratch[high];
+              scratch[low] = left + right;
+              scratch[high] = left - right;
+            }
+            item.barrier(sycl::access::fence_space::local_space);
+          }
+
+          for (int64_t index = item.get_local_id(0); index < block_size;
+               index += kWorkgroupSize) {
+            output_ptr[input_base + index] =
+                static_cast<scalar_t>(scratch[index] * normalization);
+          }
+        });
+  });
+}
+
+torch::Tensor hadamard_transform(torch::Tensor x, torch::Tensor signs,
+                                 int64_t block_size) {
+  TORCH_CHECK(x.device().is_xpu(), "x must be an XPU tensor");
+  TORCH_CHECK(signs.device() == x.device(),
+              "signs must be on the same XPU device as x");
+  TORCH_CHECK(x.dim() == 2 && signs.dim() == 1,
+              "x must be rank 2 and signs must be rank 1");
+  TORCH_CHECK(x.is_contiguous() && signs.is_contiguous(),
+              "x and signs must be contiguous");
+  TORCH_CHECK(signs.scalar_type() == torch::kFloat32,
+              "signs must use float32 storage");
+  TORCH_CHECK(x.scalar_type() == torch::kFloat32 ||
+                  x.scalar_type() == torch::kBFloat16,
+              "hadamard_transform supports float32 and bfloat16 inputs");
+  TORCH_CHECK(block_size >= 2 && block_size <= 1024 &&
+                  (block_size & (block_size - 1)) == 0,
+              "block_size must be a power of two between 2 and 1024");
+  TORCH_CHECK(signs.size(0) == x.size(1),
+              "signs width must match x feature width");
+  TORCH_CHECK(x.size(1) % block_size == 0,
+              "x feature width must be divisible by block_size");
+
+  auto output = torch::empty_like(x);
+  if (output.numel() == 0) {
+    return output;
+  }
+  if (x.scalar_type() == torch::kFloat32) {
+    launch_hadamard_transform<float>(x, signs, output, block_size);
+  } else {
+    launch_hadamard_transform<sycl::ext::oneapi::bfloat16>(x, signs, output,
+                                                            block_size);
+  }
+  return output;
+}
+
+template <typename scalar_t>
 void launch_iq3_xxs_matvec(const torch::Tensor &x, const torch::Tensor &qweight,
                            const torch::Tensor &table,
                            const torch::Tensor &signs, torch::Tensor &output) {
@@ -2939,6 +3034,8 @@ torch::Tensor iq1_m_matvec(torch::Tensor x, torch::Tensor qweight,
 } // namespace
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, module) {
+  module.def("hadamard_transform", &hadamard_transform,
+             "SYCL normalized blockwise Walsh-Hadamard transform");
   module.def("causal_conv1d_decode", &causal_conv1d_decode,
              "SYCL causal depthwise convolution decode");
   module.def("q4_0_matvec", &q4_0_matvec, "SYCL Q4_0 matrix-vector product");
