@@ -23,6 +23,7 @@ import torch
 GGML_F32 = 0
 GGML_F16 = 1
 GGML_Q4_0 = 2
+GGML_Q4_1 = 3
 GGML_Q5_0 = 6
 GGML_Q8_0 = 8
 GGML_Q2_K = 10
@@ -48,6 +49,7 @@ BLOCK_SHAPE: dict[int, tuple[int, int]] = {
     GGML_BF16: (1, 2),
     GGML_PQ2_0: (128, 34),
     GGML_Q4_0: (32, 18),
+    GGML_Q4_1: (32, 20),
     GGML_Q5_0: (32, 22),
     GGML_Q8_0: (32, 34),
     GGML_Q2_K: (256, 84),
@@ -71,6 +73,7 @@ GGML_NAME = {
     GGML_BF16: "BF16",
     GGML_PQ2_0: "PQ2_0",
     GGML_Q4_0: "Q4_0",
+    GGML_Q4_1: "Q4_1",
     GGML_Q5_0: "Q5_0",
     GGML_Q8_0: "Q8_0",
     GGML_Q2_K: "Q2_K",
@@ -142,6 +145,15 @@ def dequant_q4_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
     hi = (qs >> 4).to(torch.float32)
     q = torch.cat([lo, hi], dim=1)  # [N,32]
     return ((q - 8.0) * d).reshape(-1).to(out_dtype)
+
+
+def dequant_q4_1(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
+    """Q4_1: per 32-element block = fp16 scale/min plus 16 packed nibbles."""
+    raw = raw.reshape(-1, 20)
+    dm = raw[:, :4].contiguous().view(torch.float16).to(torch.float32).reshape(-1, 2)
+    qs = raw[:, 4:20].to(torch.int32)
+    q = torch.cat((qs & 0x0F, qs >> 4), dim=1).to(torch.float32)
+    return (q * dm[:, :1] + dm[:, 1:]).reshape(-1).to(out_dtype)
 
 
 def dequant_q5_0(raw: torch.Tensor, out_dtype: torch.dtype) -> torch.Tensor:
@@ -575,6 +587,7 @@ _DEQUANT = {
     GGML_IQ4_XS: dequant_iq4_xs,
     GGML_PQ2_0: dequant_pq2_0,
     GGML_Q4_0: dequant_q4_0,
+    GGML_Q4_1: dequant_q4_1,
     GGML_Q5_0: dequant_q5_0,
     GGML_Q2_K: dequant_q2_k,
     GGML_Q3_K: dequant_q3_k,
@@ -621,6 +634,7 @@ __all__ = [
     "GGML_Q2_K",
     "GGML_Q3_K",
     "GGML_Q4_0",
+    "GGML_Q4_1",
     "GGML_Q4_K",
     "GGML_Q5_0",
     "GGML_Q5_K",
@@ -638,6 +652,7 @@ __all__ = [
     "dequant_q2_k",
     "dequant_q3_k",
     "dequant_q4_0",
+    "dequant_q4_1",
     "dequant_q5_0",
     "dequant_q4_k",
     "dequant_q5_k",

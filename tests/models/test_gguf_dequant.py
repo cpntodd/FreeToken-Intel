@@ -17,6 +17,7 @@ from freetoken.models.gguf.dequant import (
     GGML_PQ2_0,
     GGML_Q2_K,
     GGML_Q3_K,
+    GGML_Q4_1,
     GGML_Q4_K,
     GGML_Q5_0,
     GGML_Q5_K,
@@ -56,6 +57,7 @@ def test_pq2_0_dequant_uses_prism_128_value_blocks():
     [
         (GGML_Q2_K, 84),
         (GGML_Q3_K, 110),
+        (GGML_Q4_1, 20),
         (GGML_Q5_0, 22),
         (GGML_Q5_K, 176),
         (GGML_IQ1_S, 50),
@@ -79,6 +81,8 @@ def test_additional_quant_dequant_matches_gguf_reference(quant_type, block_size)
         raw[:, 108:110] = np.array([0.25], dtype=np.float16).view(np.uint8)
     elif quant_type == GGML_Q5_0:
         raw[:, 0:2] = np.array([0.25], dtype=np.float16).view(np.uint8)
+    elif quant_type == GGML_Q4_1:
+        raw[:, 0:4] = np.array([0.25, 0.125], dtype=np.float16).view(np.uint8)
     elif (
         quant_type
         in {
@@ -125,6 +129,11 @@ def test_qwen35_quant_types_have_exact_ggml_block_sizes():
     for quant_type, type_size in expected.items():
         assert BLOCK_SHAPE[quant_type] == (256, type_size)
         assert row_bytes(5120, quant_type) == 20 * type_size
+
+
+def test_q4_1_has_standard_ggml_block_geometry():
+    assert BLOCK_SHAPE[GGML_Q4_1] == (32, 20)
+    assert row_bytes(4096, GGML_Q4_1) == 2560
 
 
 def test_q5_0_has_standard_ggml_block_geometry():

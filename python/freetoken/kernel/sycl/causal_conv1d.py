@@ -35,6 +35,17 @@ def q4_0_matvec_sycl(x: torch.Tensor, qweight: torch.Tensor) -> torch.Tensor:
     return _sycl_kernels.q4_0_matvec(x, qweight)
 
 
+def q4_1_matvec_sycl(x: torch.Tensor, qweight: torch.Tensor) -> torch.Tensor:
+    try:
+        from freetoken.kernel import _sycl_kernels
+    except ModuleNotFoundError as error:
+        raise RuntimeError(
+            "the native SYCL extension is not installed; rebuild with "
+            "FREETOKEN_ACCELERATOR=xpu and the oneAPI icpx compiler"
+        ) from error
+    return _sycl_kernels.q4_1_matvec(x, qweight)
+
+
 def q5_0_matvec_sycl(x: torch.Tensor, qweight: torch.Tensor) -> torch.Tensor:
     try:
         from freetoken.kernel import _sycl_kernels
@@ -239,6 +250,7 @@ __all__ = [
     "q2_k_matvec_sycl",
     "q3_k_matvec_sycl",
     "q4_0_matvec_sycl",
+    "q4_1_matvec_sycl",
     "q5_0_matvec_sycl",
     "q4_k_matvec_sycl",
     "q5_k_matvec_sycl",

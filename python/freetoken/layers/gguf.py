@@ -33,6 +33,7 @@ from freetoken.models.gguf.dequant import (
     GGML_Q2_K,
     GGML_Q3_K,
     GGML_Q4_0,
+    GGML_Q4_1,
     GGML_Q4_K,
     GGML_Q5_0,
     GGML_Q5_K,
@@ -80,6 +81,7 @@ def fused_mul_mat_gguf(
             q2_k_matvec_sycl,
             q3_k_matvec_sycl,
             q4_0_matvec_sycl,
+            q4_1_matvec_sycl,
             q4_k_matvec_sycl,
             q5_0_matvec_sycl,
             q5_k_matvec_sycl,
@@ -90,6 +92,8 @@ def fused_mul_mat_gguf(
         # Keep prompt batches on the measured XPU matmul path; SYCL is for decode.
         if qweight_type == GGML_Q4_0 and x.shape[0] == 1:
             return q4_0_matvec_sycl(x, qweight)
+        if qweight_type == GGML_Q4_1 and x.shape[0] == 1:
+            return q4_1_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q5_0 and x.shape[0] == 1:
             return q5_0_matvec_sycl(x, qweight)
         if qweight_type == GGML_Q8_0:
