@@ -147,7 +147,8 @@ def test_sycl_q5_k_matvec_matches_dequantized_reference(dtype):
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_sycl_iq3_xxs_matvec_matches_dequantized_reference(dtype):
+@pytest.mark.parametrize("batch", [3, 5])
+def test_sycl_iq3_xxs_matvec_matches_dequantized_reference(dtype, batch):
     from freetoken.layers.gguf import fused_mul_mat_gguf
     from freetoken.models.gguf.dequant import GGML_IQ3_XXS, dequantize
 
@@ -155,7 +156,7 @@ def test_sycl_iq3_xxs_matvec_matches_dequantized_reference(dtype):
     qweight = torch.randint(0, 256, (11, 196), dtype=torch.uint8, generator=generator)
     blocks = qweight.view(11, 2, 98)
     blocks[:, :, :2] = torch.tensor([0, 52], dtype=torch.uint8)
-    x_cpu = torch.randn(3, 512, dtype=dtype, generator=generator)
+    x_cpu = torch.randn(batch, 512, dtype=dtype, generator=generator)
     expected = x_cpu @ dequantize(qweight, GGML_IQ3_XXS, dtype).reshape(11, 512).T
 
     actual = fused_mul_mat_gguf(x_cpu.to("xpu"), qweight.to("xpu"), GGML_IQ3_XXS)
@@ -167,7 +168,8 @@ def test_sycl_iq3_xxs_matvec_matches_dequantized_reference(dtype):
 
 @pytest.mark.skipif(not torch.xpu.is_available(), reason="Intel XPU required")
 @pytest.mark.parametrize("dtype", [torch.float32, torch.bfloat16])
-def test_sycl_iq2_s_matvec_matches_dequantized_reference(dtype):
+@pytest.mark.parametrize("batch", [3, 5])
+def test_sycl_iq2_s_matvec_matches_dequantized_reference(dtype, batch):
     from freetoken.layers.gguf import fused_mul_mat_gguf
     from freetoken.models.gguf.dequant import GGML_IQ2_S, dequantize
 
@@ -175,7 +177,7 @@ def test_sycl_iq2_s_matvec_matches_dequantized_reference(dtype):
     qweight = torch.randint(0, 256, (11, 164), dtype=torch.uint8, generator=generator)
     blocks = qweight.view(11, 2, 82)
     blocks[:, :, :2] = torch.tensor([0, 52], dtype=torch.uint8)
-    x_cpu = torch.randn(3, 512, dtype=dtype, generator=generator)
+    x_cpu = torch.randn(batch, 512, dtype=dtype, generator=generator)
     expected = x_cpu @ dequantize(qweight, GGML_IQ2_S, dtype).reshape(11, 512).T
 
     actual = fused_mul_mat_gguf(x_cpu.to("xpu"), qweight.to("xpu"), GGML_IQ2_S)
