@@ -590,6 +590,24 @@ to OpenVINO's OpenCL context or can be imported there. This source-level detail 
 reason to require the exact installed-runtime probe below; it is not a substitute for
 that runtime evidence.
 
+A metadata-only host preflight on 2026-09-21 queried the OpenCL device handle from
+OpenVINO's actual B580 `ClContext`. Both `CL_DEVICE_EXTERNAL_MEMORY_IMPORT_HANDLE_TYPES_KHR`
+and `CL_PLATFORM_EXTERNAL_MEMORY_IMPORT_HANDLE_TYPES_KHR` reported
+`CL_EXTERNAL_MEMORY_HANDLE_DMA_BUF_KHR` (`0x2067`), although neither extension string
+listed `cl_khr_external_memory_dma_buf`. This advertises a DMA-BUF import type; it is
+not a test that a real fd can be imported.
+
+The matching Level Zero query identified device `0x8086:0xe20b` and reported
+`memoryAllocationExportTypes=0` and `memoryAllocationImportTypes=0`; image import and
+export types were both `0x2` (`ZE_EXTERNAL_MEMORY_TYPE_FLAG_DMA_BUF`). Thus this
+driver advertises DMA-BUF for images but not for generic Level Zero memory allocations.
+A custom PyTorch `torch.xpu.MemPool` allocator does not overcome that missing generic
+buffer-export capability through Level Zero. Keep host staging; revisit zero-copy only
+if a different tensor-buffer export route is identified and a real import, ownership,
+synchronization, and lifetime round trip passes. See [OpenVINO `ClContext`](https://docs.openvino.ai/nightly/api/c_cpp_api/classov_1_1intel__gpu_1_1ocl_1_1_cl_context.html),
+[OpenCL external-memory properties](https://registry.khronos.org/OpenCL/specs/unified/refpages/man/html/cl_khr_external_memory.html),
+and [Level Zero device external-memory properties](https://oneapi-src.github.io/level-zero-spec/level-zero/latest/core/api/apis/device.html).
+
 References: [OpenVINO GPU device documentation](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device.html),
 [GPU Remote Tensor API](https://docs.openvino.ai/2026/openvino-workflow/running-inference/inference-devices-and-modes/gpu-device/remote-tensor-api-gpu-plugin.html),
 [upstream GPU remote-context implementation](https://github.com/openvinotoolkit/openvino/blob/master/src/plugins/intel_gpu/src/plugin/remote_context.cpp),
