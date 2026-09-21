@@ -318,6 +318,15 @@ registration and stream APIs; use a dense checkpoint on XPU or CUDA for routed M
 graphs, CUDA device identifiers, and tensor parallel XPU launches are rejected rather than
 silently falling back.
 
+## CUDA regression scope
+
+The CUDA install profile and CUDA-specific execution paths remain in the codebase, but
+this host cannot provide NVIDIA hardware regression evidence: its only display-class PCI
+device is the Intel Arc B580 (`8086:e20b`), `nvidia-smi` is unavailable, and no
+`/dev/nvidia*` device nodes are present. The focused CUDA guard tests check dispatch and
+rejection behavior; they do not prove execution on an NVIDIA GPU. CUDA hardware regression
+therefore remains unverified and must be run on a supported NVIDIA host.
+
 KV and recurrent-state cache rebuilds release their old slabs through the selected CUDA
 or XPU runtime before allocating replacements. On the B580, an XPU MHA cache resize kept
 both old and new slabs on `xpu:0`; CPU devices and unavailable accelerator APIs are
