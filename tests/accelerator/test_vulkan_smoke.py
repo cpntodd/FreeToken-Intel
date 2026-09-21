@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import shutil
 import subprocess
 from pathlib import Path
@@ -16,6 +18,28 @@ PROBE = ROOT / "experiments" / "vulkan" / "run_probe.sh"
     reason="Vulkan probe toolchain unavailable",
 )
 def test_vulkan_dense_probe_executes_on_intel_discrete_gpu():
+    env = os.environ.copy()
+    env.pop("DISPLAY", None)
+    env.pop("WAYLAND_DISPLAY", None)
+    devices = subprocess.run(
+        ["vulkaninfo", "--summary"],
+        cwd=ROOT,
+        env=env,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    ).stdout.lower()
+    device_blocks = re.split(r"(?=gpu\d+:)", devices)
+    has_b580 = any(
+        re.search(r"\bvendorid\s*=\s*0x8086\b", block)
+        and re.search(r"\bdeviceid\s*=\s*0xe20b\b", block)
+        and re.search(r"\bdevicetype\s*=\s*physical_device_type_discrete_gpu\b", block)
+        for block in device_blocks
+    )
+    if not has_b580:
+        pytest.skip("Arc B580 Vulkan compute device not visible")
+
     completed = subprocess.run(
         ["bash", str(PROBE), "best"],
         cwd=ROOT,
